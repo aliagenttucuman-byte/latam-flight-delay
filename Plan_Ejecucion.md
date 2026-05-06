@@ -1613,48 +1613,289 @@ User Question → Polars extrae stats del CSV → LLM (MiniMax via OpenRouter) �
 
 ---
 
-### Archivos a Crear
+### Arquitectura: Precomputed Context (Optimizado para GCP Free Tier)
 
-| Archivo | Descripción |
-|---------|-------------|
-| `challenge/ai_insights.py` | Lógica del endpoint: Polars context + LLM call |
-| `tests/ai/test_ai_insights.py` | Unit tests del endpoint AI |
+**Problema:** GCP Cloud Run free tier tiene 1 vCPU y 512MB RAM. Leer 600k+ filas del CSV en cada request consumiría ~200MB+ de memoria y ~3-5 segundos de CPU, arriesgando cold start failures y memory spikes con requests simultáneos.
+
+**Solución:** Generar el contexto UNA vez durante el build del contenedor, guardarlo como JSON estático, y cargarlo en request time (~1ms, ~50KB).
+
+```
+BUILD TIME (Dockerfile):
+┌─────────────────────────────────────────────────────────────────────┐
+│  data/data.csv (600k filas)                                         │
+│         ↓                                                           │
+│  Polars lee solo columnas necesarias (OPERA, TIPOVUELO, MES, delay)  │
+│         ↓                                                           │
+│  Genera estadísticas (16 airlines, 12 months, cross-analysis)        │
+│         ↓                                                           │
+│  Guarda data/context.json (~50KB)                                   │
+└─────────────────────────────────────────────────────────────────────┘
+
+REQUEST TIME (Cold Run):
+┌─────────────────────────────────────────────────────────────────────┐
+│  data/context.json (~50KB) → load() → context dict (~1ms)            │
+│         ↓                                                           │
+│  build_prompt() → LLM → response                                    │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+**Beneficio:**
+| Métrica | Polars on-demand | Precomputed JSON |
+|---------|------------------|------------------|
+| Request time | 3-5 segundos | <1 segundo |
+| Memory peak | ~200MB | ~50KB |
+| Cold start impact | Alto | Casi nulo |
+| CPU GCP | Alto | Nulo |
+| Concurrent requests | Problemas de memoria | Soporta bien |
 
 ---
 
-### Archivos a Modificar
+### Archivos a Crear/Modificar
 
 | Archivo | Cambio |
 |---------|--------|
-| `challenge/api.py` | Agregar router para `/ai-insights` |
-| `requirements.txt` | Agregar `polars`, `openrouter` (o `httpx` para calls) |
-| `Makefile` | Agregar `make ai-test` |
-| `.github/workflows/ci.yml` | Agregar `make ai-test` al pipeline |
-| `Dockerfile` | Ya tiene requirements.txt, no cambia |
+| `data/context.json` | NUEVO: Generado en build time, copiado al contenedor |
+| `challenge/ai_insights.py` | NUEVO: `generate_and_save_context()` + `load_context()` |
 
 ---
 
-### Dependencias a Agregar
+### Nuenas Funciones para Build Time y Request Time
 
-```txt
-# requirements.txt (agregar)
-polars>=1.0.0
-httpx>=0.24.0
+```python
+def generate_and_save_context(
+    csv_path: str = "data/data.csv",
+    output_path: str = "data/context.json"
+) -> None:
+    """Genera contexto con Polars y lo guarda como JSON.
+
+    Esta función DEBE ejecutarse durante el build del contenedor
+    (Dockerfile RUN command). NO debe ejecutarse en request time.
+
+    Args:
+        csv_path: Path al CSV con datos de vuelos.
+        output_path: Path donde guardar el JSON precomputado.
+    """
+    context = generate_context(csv_path)
+    with open(output_path, "w") as f:
+        json.dump(context, f, indent=2)
+
+
+def load_context(json_path: str = "data/context.json") -> Dict[str, Any]:
+    """Carga contexto precomputado desde JSON.
+
+    Esta función es para request time. No usa Polars, solo lee el JSON.
+
+    Args:
+        json_path: Path al archivo JSON precomputado.
+
+    Returns:
+        Dict con el contexto cargado.
+    """
+    with open(json_path, "r") as f:
+        return json.load(f)
+
+
+# Contexto precomputado (cargado una vez, cacheado en memoria)
+_context_cache: Optional[Dict[str, Any]] = None
+
+
+def get_cached_context(json_path: str = "data/context.json") -> Dict[str, Any]:
+    """Carga y cachea el contexto en memoria.
+
+    Usa caching para evitar lecturas repetidas del archivo JSON
+    en múltiples requests.
+
+    Args:
+        json_path: Path al archivo JSON precomputado.
+
+    Returns:
+        Dict con el contexto cargado.
+    """
+    global _context_cache
+    if _context_cache is None:
+        _context_cache = load_context(json_path)
+    return _context_cache
 ```
 
-**Nota:** No se agrega `openrouter` como package porque es simplemente una API REST. Se usa `httpx` para las llamadas HTTP. El SDK de OpenRouter no es necesario para una PoC.
-
 ---
 
-### API: Nuevo Endpoint
+### Implementación Paso a Paso
 
-#### POST /ai-insights
+#### Paso 9.1: Crear `challenge/ai_insights.py`
 
-**Request:**
-```json
-{
-  "question": "¿Cuál es el patrón de retrasos para LATAM en diciembre?"
-}
+```python
+from __future__ import annotations
+
+import json
+import os
+from typing import Dict, Any, Optional
+
+import httpx
+import polars as pl
+
+
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
+OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
+DEFAULT_MODEL = "minimax/minimax-2.5"
+
+SYSTEM_PROMPT = """Eres un analista de datos experto en retrasos de vuelos del aeropuerto SCL (Santiago de Chile).
+
+DATASET:
+- Fuente: data/data.csv (~682k vuelos históricos)
+- Columnas principales:
+  - OPERA: Nombre de aerolinea (16 válidas: American Airlines, Air France, Aerolineas Argentinas, Avianca, British Airways, Copa Air, Delta Air, Grupo LATAM, Iberia, JetSmart, Korean Air, LATAM, Latin American Wings, Lloyd Aereo Boliviano, Sky Airline, United Airlines)
+  - TIPOVUELO: I=Internacional, N=Nacional
+  - MES: Mes de operación (1-12)
+  - Fecha-I: Fecha inicio (scheduled)
+  - Fecha-O: Fecha operación (actual)
+  - delay: Target binario (1 si Fecha-O - Fecha-I > 15 minutos, 0 si no)
+
+TOP 10 FEATURES DEL MODELO XGBOOST:
+- OPERA_Latin American Wings, MES_7, MES_10, OPERA_Grupo LATAM, MES_12, TIPOVUELO_I, MES_4, MES_11, OPERA_Sky Airline, OPERA_Copa Air
+
+REGLAS:
+1. Responde SIEMPRE en español
+2. Usa números y estadísticas del contexto cuando estén disponibles
+3. Si no tienes suficiente información, dilo claramente
+4. Sé conciso pero informativo (máximo 3-4 oraciones para respuestas simples)
+5. Para análisis complejos, usa bullet points
+6. IMPORTANTE: Delay se define como >15 minutos de diferencia entre Fecha-O y Fecha-I
+7. No especular sobre razones no respaldadas por los datos
+
+Contexto de los datos:
+{context}
+
+Pregunta del usuario: {question}
+"""
+
+
+def generate_context(csv_path: str = "data/data.csv") -> Dict[str, Any]:
+    """Extrae estadísticas relevantes del CSV usando Polars.
+
+    Incluye stats para las 16 aerolineas, los 12 meses, y ambos tipos de vuelo.
+    """
+    df = pl.read_csv(csv_path, low_memory=False)
+
+    total_flights = len(df)
+    total_delays = df.filter(pl.col("delay") == 1).height
+    delay_rate = total_delays / total_flights if total_flights > 0 else 0
+
+    # ALL 16 airlines (sorted by name for consistency)
+    all_airlines = [
+        "American Airlines", "Air France", "Aerolineas Argentinas", "Avianca",
+        "British Airways", "Copa Air", "Delta Air", "Grupo LATAM", "Iberia",
+        "JetSmart", "Korean Air", "LATAM", "Latin American Wings",
+        "Lloyd Aereo Boliviano", "Sky Airline", "United Airlines"
+    ]
+
+    # Delay by airline (ALL 16, not just top 5)
+    delay_by_airline_df = (
+        df.group_by("OPERA")
+        .agg(pl.col("delay").mean().alias("rate"), pl.len().alias("count"))
+        .sort("rate", descending=True)
+    )
+
+    # Ensure all 16 airlines are represented (fill missing with 0)
+    airline_rates = {row["OPERA"]: row["rate"] for row in delay_by_airline_df.to_dicts()}
+    airline_counts = {row["OPERA"]: row["count"] for row in delay_by_airline_df.to_dicts()}
+
+    delay_by_airline = {
+        "airlines": all_airlines,
+        "rates": [airline_rates.get(a, 0.0) for a in all_airlines],
+        "counts": [airline_counts.get(a, 0) for a in all_airlines]
+    }
+
+    # ALL 12 months
+    all_months = list(range(1, 13))
+    delay_by_month_df = (
+        df.group_by("MES")
+        .agg(pl.col("delay").mean().alias("rate"), pl.len().alias("count"))
+        .sort("MES")
+    )
+
+    month_rates = {row["MES"]: row["rate"] for row in delay_by_month_df.to_dicts()}
+    month_counts = {row["MES"]: row["count"] for row in delay_by_month_df.to_dicts()}
+
+    delay_by_month = {
+        "months": all_months,
+        "rates": [month_rates.get(m, 0.0) for m in all_months],
+        "counts": [month_counts.get(m, 0) for m in all_months]
+    }
+
+    # By TIPOVUELO (I and N)
+    delay_by_tipovuelo_df = (
+        df.group_by("TIPOVUELO")
+        .agg(pl.col("delay").mean().alias("rate"), pl.len().alias("count"))
+    )
+    delay_by_tipovuelo = {
+        tipovuelo: {"rate": row["rate"], "count": row["count"]}
+        for row in delay_by_tipovuelo_df.to_dicts()
+        for tipovuelo in [row["TIPOVUELO"]]
+    }
+
+    # Cross-analysis: airline x month (top combinations)
+    airline_month_df = (
+        df.group_by(["OPERA", "MES"])
+        .agg(pl.col("delay").mean().alias("rate"), pl.len().alias("count"))
+        .filter(pl.col("count") > 50)  # Only significant samples
+        .sort("rate", descending=True)
+        .head(10)
+    )
+    top_combinations = airline_month_df.to_dicts()
+
+    # Worst months (top 3)
+    month_sorted = sorted(
+        [{"MES": m, "rate": month_rates.get(m, 0.0)} for m in all_months],
+        key=lambda x: x["rate"],
+        reverse=True
+    )
+    worst_months = month_sorted[:3]
+
+    return {
+        "total_flights": total_flights,
+        "total_delays": total_delays,
+        "delay_rate": round(delay_rate, 3),
+        "delay_by_airline": delay_by_airline,
+        "delay_by_month": delay_by_month,
+        "delay_by_tipovuelo": delay_by_tipovuelo,
+        "top_combinations": top_combinations,
+        "worst_months": worst_months,
+    }
+
+
+def generate_and_save_context(
+    csv_path: str = "data/data.csv",
+    output_path: str = "data/context.json"
+) -> None:
+    """Genera contexto con Polars y lo guarda como JSON.
+
+    Esta función DEBE ejecutarse durante el build del contenedor.
+    NO debe ejecutarse en request time.
+    """
+    context = generate_context(csv_path)
+    with open(output_path, "w") as f:
+        json.dump(context, f, indent=2)
+
+
+def load_context(json_path: str = "data/context.json") -> Dict[str, Any]:
+    """Carga contexto precomputado desde JSON (request time)."""
+    with open(json_path, "r") as f:
+        return json.load(f)
+
+
+# Contexto cacheado en memoria (una vez cargado, no vuelve a leer el archivo)
+_context_cache: Optional[Dict[str, Any]] = None
+
+
+def get_cached_context(json_path: str = "data/context.json") -> Dict[str, Any]:
+    """Carga y cachea el contexto en memoria para requests múltiples."""
+    global _context_cache
+    if _context_cache is None:
+        _context_cache = load_context(json_path)
+    return _context_cache
+
+
+def build_prompt(question: str, context: Dict[str, Any]) -> list[Dict[str, str]]:
 ```
 
 **Response (200 OK):**
@@ -1991,8 +2232,12 @@ async def call_llm(prompt: list[Dict[str, str]], model: str = DEFAULT_MODEL) -> 
 
 
 async def get_ai_insight(question: str) -> Dict[str, Any]:
-    """Función principal del endpoint."""
-    context = generate_context()
+    """Función principal del endpoint.
+
+    USA get_cached_context() para request time (no usa Polars).
+    El contexto fue precomputado en build time y guardado en data/context.json.
+    """
+    context = get_cached_context()
     prompt = build_prompt(question, context)
 
     try:
@@ -2059,11 +2304,16 @@ async def ai_insights(request: AIInsightRequest) -> Dict[str, Any]:
 #### Paso 9.3: Crear `tests/ai/test_ai_insights.py`
 
 ```python
+import json
+import os
 import pytest
-from unittest.mock import patch, AsyncMock
+from unittest.mock import patch, AsyncMock, mock_open
 
 from challenge.ai_insights import (
     generate_context,
+    generate_and_save_context,
+    load_context,
+    get_cached_context,
     build_prompt,
     _format_context,
     call_llm,
@@ -2072,7 +2322,7 @@ from challenge.ai_insights import (
 
 
 class TestPolarsContext:
-    """Tests for Polars context generation."""
+    """Tests for Polars context generation (build time)."""
 
     def test_generate_context_returns_dict(self):
         """Context is a dictionary with expected keys."""
@@ -2085,6 +2335,13 @@ class TestPolarsContext:
         """Context includes delay by airline."""
         context = generate_context()
         assert "delay_by_airline" in context
+        assert len(context["delay_by_airline"]["airlines"]) == 16
+
+    def test_generate_context_has_months(self):
+        """Context includes all 12 months."""
+        context = generate_context()
+        assert "delay_by_month" in context
+        assert len(context["delay_by_month"]["months"]) == 12
 
     def test_delay_rate_is_percentage(self):
         """Delay rate is between 0 and 1."""
@@ -2092,19 +2349,96 @@ class TestPolarsContext:
         assert 0 <= context["delay_rate"] <= 1
 
 
+class TestContextPersistence:
+    """Tests for JSON save/load (build time)."""
+
+    def test_generate_and_save_context_creates_file(self, tmp_path):
+        """generate_and_save_context creates a JSON file."""
+        csv_path = "data/data.csv"
+        output_path = tmp_path / "context.json"
+
+        generate_and_save_context(csv_path, str(output_path))
+
+        assert output_path.exists()
+        with open(output_path, "r") as f:
+            data = json.load(f)
+        assert "total_flights" in data
+        assert "delay_rate" in data
+
+    def test_load_context_returns_dict(self, tmp_path):
+        """load_context returns dictionary from JSON."""
+        context_data = {"total_flights": 1000, "delay_rate": 0.15}
+        json_path = tmp_path / "context.json"
+
+        with open(json_path, "w") as f:
+            json.dump(context_data, f)
+
+        loaded = load_context(str(json_path))
+        assert loaded == context_data
+
+
+class TestCachedContext:
+    """Tests for cached context (request time)."""
+
+    def test_get_cached_context_returns_dict(self):
+        """get_cached_context returns the context dictionary."""
+        with patch("challenge.ai_insights.load_context") as mock_load:
+            mock_load.return_value = {"total_flights": 1000, "delay_rate": 0.15}
+
+            # Reset cache for test isolation
+            import challenge.ai_insights
+            challenge.ai_insights._context_cache = None
+
+            result = get_cached_context()
+            assert result == {"total_flights": 1000, "delay_rate": 0.15}
+
+    def test_get_cached_context_caches_result(self):
+        """get_cached_context caches the result to avoid repeated reads."""
+        with patch("challenge.ai_insights.load_context") as mock_load:
+            mock_load.return_value = {"total_flights": 1000, "delay_rate": 0.15}
+
+            # Reset cache
+            import challenge.ai_insights
+            challenge.ai_insights._context_cache = None
+
+            # First call
+            get_cached_context()
+            # Second call
+            get_cached_context()
+
+            # load_context should be called only once
+            assert mock_load.call_count == 1
+
+
 class TestPromptBuilding:
     """Tests for prompt construction."""
 
     def test_build_prompt_returns_list(self):
         """Prompt is a list of message dicts."""
-        context = {"total_flights": 100, "delay_rate": 0.15}
+        context = {
+            "total_flights": 100,
+            "delay_rate": 0.15,
+            "delay_by_airline": {"airlines": [], "rates": [], "counts": []},
+            "delay_by_month": {"months": [], "rates": [], "counts": []},
+            "delay_by_tipovuelo": {},
+            "top_combinations": [],
+            "worst_months": []
+        }
         prompt = build_prompt("Why are flights delayed?", context)
         assert isinstance(prompt, list)
         assert len(prompt) >= 1
 
     def test_prompt_has_system_and_user(self):
         """Prompt contains system and user messages."""
-        context = {"total_flights": 100, "delay_rate": 0.15}
+        context = {
+            "total_flights": 100,
+            "delay_rate": 0.15,
+            "delay_by_airline": {"airlines": [], "rates": [], "counts": []},
+            "delay_by_month": {"months": [], "rates": [], "counts": []},
+            "delay_by_tipovuelo": {},
+            "top_combinations": [],
+            "worst_months": []
+        }
         prompt = build_prompt("Why are flights delayed?", context)
         roles = [m["role"] for m in prompt]
         assert "system" in roles
@@ -2227,9 +2561,37 @@ En `.github/workflows/ci.yml`, agregar después de api-test:
 
 ---
 
-#### Paso 9.8: Actualizar Dockerfile (si es necesario)
+#### Paso 9.8: Actualizar Dockerfile
 
-El Dockerfile actual copia `requirements.txt` e instala todo. Si Polars y httpx están en requirements.txt, no necesita cambios.
+El Dockerfile necesita ejecutar `generate_and_save_context()` durante build para generar el archivo `data/context.json`.
+
+```dockerfile
+# syntax=docker/dockerfile:1.2
+FROM python:3.11-slim
+
+WORKDIR /app
+
+COPY requirements*.txt ./
+
+RUN pip install --no-cache-dir -r requirements.txt && \
+    pip install --no-cache-dir -r requirements-test.txt && \
+    pip install --no-cache-dir -r requirements-dev.txt
+
+COPY challenge/ ./challenge/
+COPY data/ ./data/
+
+# Generate context.json during build (only once)
+RUN python -c "from challenge.ai_insights import generate_and_save_context; generate_and_save_context()"
+
+ENV PYTHONUNBUFFERED=1
+ENV PORT=8080
+
+EXPOSE 8080
+
+CMD ["uvicorn", "challenge.api:app", "--host", "0.0.0.0", "--port", "8080"]
+```
+
+**Nota:** El archivo `data/context.json` se genera en build time y se incluye en el contenedor. En request time, `get_cached_context()` solo lee el JSON (~50KB, ~1ms), sin usar Polars.
 
 ---
 
