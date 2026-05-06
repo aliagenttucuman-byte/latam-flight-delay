@@ -16,6 +16,8 @@ COPY data/ ./data/
 
 ENV PYTHONUNBUFFERED=1
 
-EXPOSE 8000
+EXPOSE 8080
 
-CMD ["uvicorn", "challenge.api:app", "--host", "0.0.0.0", "--port", "8000"]
+ENV PORT=8080
+
+CMD ["uvicorn", "challenge.api:app", "--host", "0.0.0.0", "--port", "8080"]
