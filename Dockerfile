@@ -14,6 +14,9 @@ RUN pip install --no-cache-dir -r requirements.txt && \
 COPY challenge/ ./challenge/
 COPY data/ ./data/
 
+# Generate context.json during build (only once)
+RUN python -c "from challenge.ai_insights import generate_and_save_context; generate_and_save_context()"
+
 ENV PYTHONUNBUFFERED=1
 
 EXPOSE 8080

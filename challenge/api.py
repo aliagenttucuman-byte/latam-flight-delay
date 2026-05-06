@@ -7,10 +7,13 @@ from fastapi import FastAPI, HTTPException, status
 from fastapi.responses import JSONResponse
 from fastapi.exceptions import RequestValidationError
 from pydantic import BaseModel, Field, field_validator, ValidationError
-from typing import Annotated, List, Dict, Any
+from typing import Annotated, List, Dict, Any, Optional
 
 import pandas as pd
 import numpy as np
+
+
+from challenge.ai_insights import get_ai_insight
 
 
 VALID_OPERAS: List[str] = [
@@ -174,4 +177,44 @@ async def predict(batch: FlightBatch) -> Dict[str, List[int]]:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Prediction error: {str(e)}"
+        )
+
+
+class AIInsightRequest(BaseModel):
+    """Request model for AI insights endpoint."""
+    question: str
+    model: Optional[str] = None
+
+
+@app.post(
+    "/ai-insights",
+    response_model=Dict[str, Any],
+    status_code=status.HTTP_200_OK,
+    responses={
+        400: {"description": "Invalid question"},
+        500: {"description": "LLM call failed"}
+    }
+)
+async def ai_insights(request: AIInsightRequest) -> Dict[str, Any]:
+    """Get AI-powered insights about flight delays.
+
+    Uses Polars to extract context from data.csv (precomputed at build time)
+    and MiniMax LLM to generate conversational analysis.
+
+    Args:
+        request: Contains the question to ask about the data.
+
+    Returns:
+        Dict with 'insight' key containing the LLM response.
+
+    Raises:
+        HTTPException 500: If LLM call fails.
+    """
+    try:
+        result = await get_ai_insight(request.question)
+        return result
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=str(e)
         )

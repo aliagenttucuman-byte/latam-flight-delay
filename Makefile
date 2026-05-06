@@ -40,6 +40,11 @@ api-test:			## Run tests and coverage
 	mkdir reports || true
 	pytest --cov-config=.coveragerc --cov-report term --cov-report html:reports/html --cov-report xml:reports/coverage.xml --junitxml=reports/junit.xml --cov=challenge tests/api
 
+.PHONY: ai-test
+ai-test:			## Run AI insights tests
+	mkdir reports || true
+	pytest tests/ai/test_ai_insights.py -v
+
 .PHONY: build
 build:			## Build locally the python artifact
 	python setup.py bdist_wheel
