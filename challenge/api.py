@@ -183,7 +183,6 @@ async def predict(batch: FlightBatch) -> Dict[str, List[int]]:
 class AIInsightRequest(BaseModel):
     """Request model for AI insights endpoint."""
     question: str
-    model: Optional[str] = None
 
 
 @app.post(
