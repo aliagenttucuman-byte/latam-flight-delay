@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+# DEFAULT_MODEL updated to claude-sonnet-4 (tested and working)
 import json
 import os
 from typing import Dict, Any, Optional
