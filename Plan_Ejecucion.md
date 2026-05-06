@@ -15,7 +15,7 @@ El objetivo es operacionalizar un modelo de predicción de retrasos de vuelos de
 ### API (api.py)
 - Estado: **COMPLETO** - endpoint `/predict` implementado con validación
 - Validación: `OPERA` (16aerolíneas conocidas), `TIPOVUELO` (I/N), `MES` (1-12)
-- Pydantic v1: usa `@validator` (no `field_validator`) para compatibilidad con versión instalada 1.10.2
+- Pydantic v2: usa `@field_validator` (actualizado de `@validator` en upgrade 2026-05-06)
 - Lazy loading del modelo con singleton pattern
 
 ### CI/CD (.github/workflows/)
