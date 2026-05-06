@@ -1564,3 +1564,791 @@ jobs:
 ```
 
 **Nota:** Se removió `gcloud services enable` y `Output URL` step para evitar errores de permisos y sintaxis.
+
+---
+
+## FASE 9: PoC AI Insights - RAG con Polars + MiniMax
+
+### Resumen del Feature
+
+Agregar un nuevo endpoint `/ai-insights` que usa IA generativa para analizar retrasos de vuelos. El flujo es un RAG simple:
+
+```
+User Question → Polars extrae stats del CSV → LLM (MiniMax via OpenRouter) → Respuesta conversacional
+```
+
+**Objetivo:** Demostrar cómo un LLM puede conversar con datos estructurados de vuelos, detectando patrones y generando insights.
+
+---
+
+### Arquitectura del Feature
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│                         CLIENT REQUEST                               │
+│  POST /ai-insights                                                    │
+│  { "question": "¿Por qué se retrasan los vuelos en julio?" }         │
+└─────────────────────────────┬───────────────────────────────────────┘
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────────────┐
+│                   challenge/ai_insights.py                            │
+│                                                                      │
+│  1. generate_context(csv_path) → Polars extrae stats del CSV         │
+│  2. build_prompt(question, context) → Arma system + user prompt     │
+│  3. call_llm(prompt) → Llama a MiniMax via OpenRouter               │
+│  4. return {"insight": "..."}                                       │
+└─────────────────────────────┬───────────────────────────────────────┘
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────────────┐
+│                    LLM (MiniMax 2.5 via OpenRouter)                  │
+│                                                                      │
+│  Model: minimax/minimax-2.5                                          │
+│  API: https://openrouter.ai/api/v1/chat/completions                  │
+│  System Role: "Data analyst expert, responds in Spanish"            │
+│  Context: Stats extracted by Polars (delay rates, patterns, etc)     │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+---
+
+### Archivos a Crear
+
+| Archivo | Descripción |
+|---------|-------------|
+| `challenge/ai_insights.py` | Lógica del endpoint: Polars context + LLM call |
+| `tests/ai/test_ai_insights.py` | Unit tests del endpoint AI |
+
+---
+
+### Archivos a Modificar
+
+| Archivo | Cambio |
+|---------|--------|
+| `challenge/api.py` | Agregar router para `/ai-insights` |
+| `requirements.txt` | Agregar `polars`, `openrouter` (o `httpx` para calls) |
+| `Makefile` | Agregar `make ai-test` |
+| `.github/workflows/ci.yml` | Agregar `make ai-test` al pipeline |
+| `Dockerfile` | Ya tiene requirements.txt, no cambia |
+
+---
+
+### Dependencias a Agregar
+
+```txt
+# requirements.txt (agregar)
+polars>=1.0.0
+httpx>=0.24.0
+```
+
+**Nota:** No se agrega `openrouter` como package porque es simplemente una API REST. Se usa `httpx` para las llamadas HTTP. El SDK de OpenRouter no es necesario para una PoC.
+
+---
+
+### API: Nuevo Endpoint
+
+#### POST /ai-insights
+
+**Request:**
+```json
+{
+  "question": "¿Cuál es el patrón de retrasos para LATAM en diciembre?"
+}
+```
+
+**Response (200 OK):**
+```json
+{
+  "insight": "Según el análisis de los datos históricos, LATAM en diciembre tiene una tasa de retraso del 22%, siendo diciembre el segundo mes con mayor retrasos del año. Los vuelos internacionales (TIPOVUELO_I) representan el 78% de los retrasos, especialmente hacia destinos en Brasil y Argentina. Esto se debe a la alta demanda de viajeros vacaciones y condiciones climáticas переменчив в la zona sur de Sudamérica.",
+  "context_used": {
+    "total_flights": 682,
+    "delay_rate": 0.22,
+    "top_airline": "LATAM",
+    "month": 12,
+    "month_delay_rate": 0.31
+  }
+}
+```
+
+**Error Response (500):**
+```json
+{
+  "error": "LLM call failed: connection timeout"
+}
+```
+
+---
+
+### Polars: Contexto Automático
+
+La función `generate_context(csv_path)` extrae automáticamente:
+
+```python
+{
+    "total_flights": int,
+    "delay_rate": float,  # % general de retrasos
+    "total_delays": int,
+    "delay_by_airline": {  # top 5
+        "LATAM": 0.18,
+        "Sky Airline": 0.21,
+        ...
+    },
+    "delay_by_month": {  # todos los meses
+        "1": 0.12,
+        "7": 0.28,
+        "12": 0.31,
+        ...
+    },
+    "delay_by_tipovuelo": {"I": 0.19, "N": 0.14},
+    "top_delay_reasons": ["weather", "airline_ops", "demand"],
+    "data_sample": "últimas 5 filas representativas"
+}
+```
+
+Este contexto se pasa al LLM como parte del prompt.
+
+---
+
+### LLM: System Prompt
+
+```python
+SYSTEM_PROMPT = """Eres un analista de datos experto en retrasos de vuelos del aeropuerto SCL (Santiago de Chile).
+
+Tienes acceso a estadísticas históricas de vuelos y retrasos. Based on the provided context, responde preguntas sobre patrones de retrasos, comparaciones entre aerolineas, y análisis predictivo.
+
+Rules:
+1. Responde SIEMPRE en español
+2. Usa números y estadísticas del contexto cuando estén disponibles
+3. Si no tienes suficiente información, dilo claramente
+4. Sé conciso pero informativo (máximo 3-4 oraciones para respuestas simples)
+5. Para análisis complejos, estructura tu respuesta con bullet points
+
+Contexto de los datos:
+{context}
+
+Pregunta del usuario: {question}
+"""
+```
+
+---
+
+### Implementación Paso a Paso
+
+#### Paso 9.1: Crear `challenge/ai_insights.py`
+
+```python
+from __future__ import annotations
+
+import os
+from typing import Dict, Any
+
+import httpx
+import polars as pl
+
+
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
+OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
+DEFAULT_MODEL = "minimax/minimax-2.5"
+
+SYSTEM_PROMPT = """Eres un analista de datos experto en retrasos de vuelos del aeropuerto SCL (Santiago de Chile).
+
+DATASET:
+- Fuente: data/data.csv (~682k vuelos históricos)
+- Columnas principales:
+  - OPERA: Nombre de aerolinea (16 válidas: American Airlines, Air France, Aerolineas Argentinas, Avianca, British Airways, Copa Air, Delta Air, Grupo LATAM, Iberia, JetSmart, Korean Air, LATAM, Latin American Wings, Lloyd Aereo Boliviano, Sky Airline, United Airlines)
+  - TIPOVUELO: I=Internacional, N=Nacional
+  - MES: Mes de operación (1-12)
+  - Fecha-I: Fecha inicio (scheduled)
+  - Fecha-O: Fecha operación (actual)
+  - delay: Target binario (1 si Fecha-O - Fecha-I > 15 minutos, 0 si no)
+
+TOP 10 FEATURES DEL MODELO XGBOOST:
+- OPERA_Latin American Wings, MES_7, MES_10, OPERA_Grupo LATAM, MES_12, TIPOVUELO_I, MES_4, MES_11, OPERA_Sky Airline, OPERA_Copa Air
+
+REGLAS:
+1. Responde SIEMPRE en español
+2. Usa números y estadísticas del contexto cuando estén disponibles
+3. Si no tienes suficiente información, dilo claramente
+4. Sé conciso pero informativo (máximo 3-4 oraciones para respuestas simples)
+5. Para análisis complejos, usa bullet points
+6. IMPORTANTE: Delay se define como >15 minutos de diferencia entre Fecha-O y Fecha-I
+7. No especular sobre razones no respaldadas por los datos
+
+Contexto de los datos:
+{context}
+
+Pregunta del usuario: {question}
+"""
+
+
+def generate_context(csv_path: str = "data/data.csv") -> Dict[str, Any]:
+    """Extrae estadísticas relevantes del CSV usando Polars.
+
+    Incluye stats para las 16 aerolineas, los 12 meses, y ambos tipos de vuelo.
+    """
+    df = pl.read_csv(csv_path, low_memory=False)
+
+    total_flights = len(df)
+    total_delays = df.filter(pl.col("delay") == 1).height
+    delay_rate = total_delays / total_flights if total_flights > 0 else 0
+
+    # ALL 16 airlines (sorted by name for consistency)
+    all_airlines = [
+        "American Airlines", "Air France", "Aerolineas Argentinas", "Avianca",
+        "British Airways", "Copa Air", "Delta Air", "Grupo LATAM", "Iberia",
+        "JetSmart", "Korean Air", "LATAM", "Latin American Wings",
+        "Lloyd Aereo Boliviano", "Sky Airline", "United Airlines"
+    ]
+
+    # Delay by airline (ALL 16, not just top 5)
+    delay_by_airline_df = (
+        df.group_by("OPERA")
+        .agg(pl.col("delay").mean().alias("rate"), pl.len().alias("count"))
+        .sort("rate", descending=True)
+    )
+
+    # Ensure all 16 airlines are represented (fill missing with 0)
+    airline_rates = {row["OPERA"]: row["rate"] for row in delay_by_airline_df.to_dicts()}
+    airline_counts = {row["OPERA"]: row["count"] for row in delay_by_airline_df.to_dicts()}
+
+    delay_by_airline = {
+        "airlines": all_airlines,
+        "rates": [airline_rates.get(a, 0.0) for a in all_airlines],
+        "counts": [airline_counts.get(a, 0) for a in all_airlines]
+    }
+
+    # ALL 12 months
+    all_months = list(range(1, 13))
+    delay_by_month_df = (
+        df.group_by("MES")
+        .agg(pl.col("delay").mean().alias("rate"), pl.len().alias("count"))
+        .sort("MES")
+    )
+
+    month_rates = {row["MES"]: row["rate"] for row in delay_by_month_df.to_dicts()}
+    month_counts = {row["MES"]: row["count"] for row in delay_by_month_df.to_dicts()}
+
+    delay_by_month = {
+        "months": all_months,
+        "rates": [month_rates.get(m, 0.0) for m in all_months],
+        "counts": [month_counts.get(m, 0) for m in all_months]
+    }
+
+    # By TIPOVUELO (I and N)
+    delay_by_tipovuelo_df = (
+        df.group_by("TIPOVUELO")
+        .agg(pl.col("delay").mean().alias("rate"), pl.len().alias("count"))
+    )
+    delay_by_tipovuelo = {
+        tipovuelo: {"rate": row["rate"], "count": row["count"]}
+        for row in delay_by_tipovuelo_df.to_dicts()
+        for tipovuelo in [row["TIPOVUELO"]]
+    }
+
+    # Cross-analysis: airline x month (top combinations)
+    airline_month_df = (
+        df.group_by(["OPERA", "MES"])
+        .agg(pl.col("delay").mean().alias("rate"), pl.len().alias("count"))
+        .filter(pl.col("count") > 50)  # Only significant samples
+        .sort("rate", descending=True)
+        .head(10)
+    )
+    top_combinations = airline_month_df.to_dicts()
+
+    # Worst months (top 3)
+    month_sorted = sorted(
+        [{"MES": m, "rate": month_rates.get(m, 0.0)} for m in all_months],
+        key=lambda x: x["rate"],
+        reverse=True
+    )
+    worst_months = month_sorted[:3]
+
+    return {
+        "total_flights": total_flights,
+        "total_delays": total_delays,
+        "delay_rate": round(delay_rate, 3),
+        "delay_by_airline": delay_by_airline,
+        "delay_by_month": delay_by_month,
+        "delay_by_tipovuelo": delay_by_tipovuelo,
+        "top_combinations": top_combinations,
+        "worst_months": worst_months,
+    }
+
+
+def build_prompt(question: str, context: Dict[str, Any]) -> list[Dict[str, str]]:
+    """Arma los mensajes para el LLM."""
+    context_str = _format_context(context)
+    system = SYSTEM_PROMPT.format(context=context_str, question=question)
+
+    return [
+        {"role": "system", "content": system},
+        {"role": "user", "content": question}
+    ]
+
+
+def _format_context(context: Dict[str, Any]) -> str:
+    """Formatea el contexto para el prompt."""
+    lines = [
+        f"Total de vuelos analizados: {context['total_flights']:,}",
+        f"Total de retrasos: {context['total_delays']:,} ({context['delay_rate']:.1%})",
+        "",
+        "=" * 50,
+        "ESTADISTICAS POR AEROLINEA (las 16):",
+        "=" * 50,
+    ]
+
+    airlines = context["delay_by_airline"]["airlines"]
+    rates = context["delay_by_airline"]["rates"]
+    counts = context["delay_by_airline"]["counts"]
+
+    for airline, rate, count in zip(airlines, rates, counts):
+        lines.append(f"  {airline:30s} | Delay: {rate:5.1%} | Vuelos: {count:6,}")
+
+    lines.extend([
+        "",
+        "=" * 50,
+        "ESTADISTICAS POR MES (1-12):",
+        "=" * 50,
+    ])
+
+    months = context["delay_by_month"]["months"]
+    month_rates = context["delay_by_month"]["rates"]
+    month_counts = context["delay_by_month"]["counts"]
+
+    month_names = ["Ene", "Feb", "Mar", "Abr", "May", "Jun",
+                  "Jul", "Ago", "Sep", "Oct", "Nov", "Dic"]
+
+    for mes, rate, count, nombre in zip(months, month_rates, month_counts, month_names):
+        lines.append(f"  Mes {mes:2d} ({nombre}) | Delay: {rate:5.1%} | Vuelos: {count:6,}")
+
+    lines.extend([
+        "",
+        "=" * 50,
+        "ESTADISTICAS POR TIPO DE VUELO:",
+        "=" * 50,
+    ])
+
+    tipovuelo = context["delay_by_tipovuelo"]
+    i_data = tipovuelo.get("I", {"rate": 0, "count": 0})
+    n_data = tipovuelo.get("N", {"rate": 0, "count": 0})
+    lines.append(f"  Internacional (I) | Delay: {i_data['rate']:5.1%} | Vuelos: {i_data['count']:6,}")
+    lines.append(f"  Nacional     (N) | Delay: {n_data['rate']:5.1%} | Vuelos: {n_data['count']:6,}")
+
+    lines.extend([
+        "",
+        "=" * 50,
+        "PEORES MESES PARA VOLAR (top 3):",
+        "=" * 50,
+    ])
+
+    month_names_dict = {1: "Enero", 2: "Febrero", 3: "Marzo", 4: "Abril",
+                       5: "Mayo", 6: "Junio", 7: "Julio", 8: "Agosto",
+                       9: "Septiembre", 10: "Octubre", 11: "Noviembre", 12: "Diciembre"}
+
+    for item in context["worst_months"]:
+        mes = item["MES"]
+        rate = item["rate"]
+        lines.append(f"  {month_names_dict.get(mes, mes)} (Mes {mes}): {rate:.1%} de retrasos")
+
+    lines.extend([
+        "",
+        "=" * 50,
+        "COMBINACIONES AEROLINEA + MES MAS PROBLEMÁTICAS (top 10):",
+        "=" * 50,
+    ])
+
+    for i, combo in enumerate(context["top_combinations"], 1):
+        opera = combo["OPERA"]
+        mes = combo["MES"]
+        rate = combo["rate"]
+        count = combo["count"]
+        lines.append(f"  {i:2d}. {opera:25s} + Mes {mes:2d} | Delay: {rate:5.1%} | Vuelos: {count:5,}")
+
+    return "\n".join(lines)
+
+
+async def call_llm(prompt: list[Dict[str, str]], model: str = DEFAULT_MODEL) -> str:
+    """Llama al LLM via OpenRouter."""
+    if not OPENROUTER_API_KEY:
+        raise ValueError("OPENROUTER_API_KEY environment variable not set")
+
+    async with httpx.AsyncClient(timeout=60.0) as client:
+        response = await client.post(
+            OPENROUTER_URL,
+            headers={
+                "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": model,
+                "messages": prompt,
+            }
+        )
+        response.raise_for_status()
+        data = response.json()
+        return data["choices"][0]["message"]["content"]
+
+
+async def get_ai_insight(question: str) -> Dict[str, Any]:
+    """Función principal del endpoint."""
+    context = generate_context()
+    prompt = build_prompt(question, context)
+
+    try:
+        insight = await call_llm(prompt)
+        return {
+            "insight": insight,
+            "context_used": {
+                "total_flights": context["total_flights"],
+                "delay_rate": context["delay_rate"]
+            }
+        }
+    except Exception as e:
+        raise RuntimeError(f"LLM call failed: {str(e)}")
+```
+
+---
+
+#### Paso 9.2: Modificar `challenge/api.py`
+
+Agregar el endpoint `/ai-insights`:
+
+```python
+from challenge.ai_insights import get_ai_insight
+
+
+class AIInsightRequest(BaseModel):
+    question: str
+    model: Optional[str] = None
+
+
+@app.post(
+    "/ai-insights",
+    response_model=Dict[str, Any],
+    status_code=status.HTTP_200_OK,
+    responses={
+        400: {"description": "Invalid question"},
+        500: {"description": "LLM call failed"}
+    }
+)
+async def ai_insights(request: AIInsightRequest) -> Dict[str, Any]:
+    """Get AI-powered insights about flight delays.
+
+    Uses Polars to extract context from data.csv and MiniMax LLM
+    to generate conversational analysis.
+
+    Args:
+        request: Contains the question to ask about the data.
+
+    Returns:
+        Dict with 'insight' key containing the LLM response.
+    """
+    try:
+        result = await get_ai_insight(request.question)
+        return result
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=str(e)
+        )
+```
+
+---
+
+#### Paso 9.3: Crear `tests/ai/test_ai_insights.py`
+
+```python
+import pytest
+from unittest.mock import patch, AsyncMock
+
+from challenge.ai_insights import (
+    generate_context,
+    build_prompt,
+    _format_context,
+    call_llm,
+    get_ai_insight
+)
+
+
+class TestPolarsContext:
+    """Tests for Polars context generation."""
+
+    def test_generate_context_returns_dict(self):
+        """Context is a dictionary with expected keys."""
+        context = generate_context()
+        assert isinstance(context, dict)
+        assert "total_flights" in context
+        assert "delay_rate" in context
+
+    def test_generate_context_has_airlines(self):
+        """Context includes delay by airline."""
+        context = generate_context()
+        assert "delay_by_airline" in context
+
+    def test_delay_rate_is_percentage(self):
+        """Delay rate is between 0 and 1."""
+        context = generate_context()
+        assert 0 <= context["delay_rate"] <= 1
+
+
+class TestPromptBuilding:
+    """Tests for prompt construction."""
+
+    def test_build_prompt_returns_list(self):
+        """Prompt is a list of message dicts."""
+        context = {"total_flights": 100, "delay_rate": 0.15}
+        prompt = build_prompt("Why are flights delayed?", context)
+        assert isinstance(prompt, list)
+        assert len(prompt) >= 1
+
+    def test_prompt_has_system_and_user(self):
+        """Prompt contains system and user messages."""
+        context = {"total_flights": 100, "delay_rate": 0.15}
+        prompt = build_prompt("Why are flights delayed?", context)
+        roles = [m["role"] for m in prompt]
+        assert "system" in roles
+        assert "user" in roles
+
+
+class TestFormatContext:
+    """Tests for context formatting."""
+
+    def test_format_context_includes_numbers(self):
+        """Formatted context includes flight numbers."""
+        context = {
+            "total_flights": 682,
+            "delay_rate": 0.15,
+            "delay_by_airline": {"OPERA": ["LATAM"], "rate": [0.18]},
+            "delay_by_month": {"MES": [12], "rate": [0.31]},
+            "delay_by_tipovuelo": {"TIPOVUELO": ["I"], "rate": [0.19]}
+        }
+        formatted = _format_context(context)
+        assert "682" in formatted
+        assert "LATAM" in formatted
+
+
+class TestLLMCall:
+    """Tests for LLM integration."""
+
+    @pytest.mark.asyncio
+    @patch("challenge.ai_insights.httpx.AsyncClient")
+    async def test_call_llm_success(self, mock_client):
+        """Successful LLM call returns content."""
+        mock_response = AsyncMock()
+        mock_response.json.return_value = {
+            "choices": [{"message": {"content": "Test response"}}]
+        }
+        mock_response.raise_for_status = lambda: None
+
+        mock_client.return_value.__aenter__.return_value.post = AsyncMock(
+            return_value=mock_response
+        )
+
+        prompt = [{"role": "user", "content": "test"}]
+        result = await call_llm(prompt)
+        assert result == "Test response"
+
+    @pytest.mark.asyncio
+    async def test_call_llm_no_api_key(self):
+        """Error when OPENROUTER_API_KEY is not set."""
+        with patch.dict("os.environ", {"OPENROUTER_API_KEY": ""}):
+            prompt = [{"role": "user", "content": "test"}]
+            with pytest.raises(ValueError, match="OPENROUTER_API_KEY"):
+                await call_llm(prompt)
+
+
+class TestGetInsight:
+    """Tests for the main insight function."""
+
+    @pytest.mark.asyncio
+    @patch("challenge.ai_insights.call_llm", new_callable=AsyncMock)
+    async def test_get_ai_insight_returns_dict(self, mock_llm):
+        """Function returns dict with insight and context."""
+        mock_llm.return_value = "Los vuelos en diciembre tienen más retrasos."
+
+        result = await get_ai_insight("¿Por qué se retrasan los vuelos?")
+
+        assert isinstance(result, dict)
+        assert "insight" in result
+        assert "context_used" in result
+
+    @pytest.mark.asyncio
+    @patch("challenge.ai_insights.call_llm", new_callable=AsyncMock)
+    async def test_get_ai_insight_error_handling(self, mock_llm):
+        """Function raises RuntimeError on LLM failure."""
+        mock_llm.side_effect = Exception("Connection failed")
+
+        with pytest.raises(RuntimeError, match="LLM call failed"):
+            await get_ai_insight("¿Por qué se retrasan los vuelos?")
+```
+
+---
+
+#### Paso 9.4: Agregar a requirements.txt
+
+```txt
+# requirements.txt (append)
+polars>=1.0.0
+httpx>=0.24.0
+```
+
+---
+
+#### Paso 9.5: Agregar a Makefile
+
+```makefile
+.PHONY: ai-test
+ai-test:       ## Run AI insights tests
+    mkdir reports || true
+    pytest tests/ai/test_ai_insights.py -v
+```
+
+---
+
+#### Paso 9.6: Agregar al CI/CD
+
+En `.github/workflows/ci.yml`, agregar después de api-test:
+
+```yaml
+      - name: Run AI insights tests
+        run: python -m pytest tests/ai/test_ai_insights.py -v
+```
+
+---
+
+#### Paso 9.7: Configurar OPENROUTER_API_KEY en GitHub
+
+1. Ir a: https://github.com/aliagenttucuman-byte/latam-flight-delay/settings/secrets/actions
+2. Click **"New repository secret"**
+3. Nombre: `OPENROUTER_API_KEY`
+4. Valor: (tu API key de OpenRouter)
+5. Save
+
+---
+
+#### Paso 9.8: Actualizar Dockerfile (si es necesario)
+
+El Dockerfile actual copia `requirements.txt` e instala todo. Si Polars y httpx están en requirements.txt, no necesita cambios.
+
+---
+
+### Tests para Ejecutar
+
+```bash
+# Local
+make ai-test
+
+# Via Docker
+docker run delay-model-api:latest pytest tests/ai/test_ai_insights.py -v
+
+# En GitHub Actions (automático en CI)
+```
+
+---
+
+### Llamar al Endpoint
+
+```bash
+# Test local (si la API está corriendo en puerto 8080)
+curl -X POST "http://localhost:8080/ai-insights" \
+  -H "Content-Type: application/json" \
+  -d '{"question": "¿Cuál es el mejor mes para volar sin retrasos?"}'
+
+# Test en producción (GCP)
+curl -X POST "https://delay-model-api-chxpmithta-rj.a.run.app/ai-insights" \
+  -H "Content-Type: application/json" \
+  -d '{"question": "¿Cuál es el mejor mes para volar sin retrasos?"}'
+```
+
+---
+
+### Respuestas de Ejemplo
+
+**Pregunta:** `¿Por qué se retrasan los vuelos en julio?`
+
+**Respuesta:**
+```
+Julio es el mes con mayor tasa de retrasos (28%), seguido de diciembre (31%) y noviembre (27%). Esto se debe principalmente a:
+
+• Condiciones climáticas invernales en la zona andina (最少 nevadas y tormentas)
+• Alta demanda de vuelos hacia destinos turísticos de invierno (Brasil, Argentina)
+• Sky Airline tiene la tasa de retrasos más alta (21%) en julio, mientras que LATAM opera el 45% de los vuelos ese mes
+• Los vuelos internacionales (I) tienen 5% más retrasos que los nacionales (N) en este periodo
+
+Recomendación: Si volás en julio, elegí清晨 first flights para evitar retrasos acumulados.
+```
+
+---
+
+### Notas Importantes
+
+1. **No afecta el deploy existente**: Agregar este endpoint no cambia el CD. Solo agrega un nuevo route.
+
+2. **Polars no reemplaza a Pandas**: Solo se usa Polars para el endpoint AI. El modelo existente sigue usando Pandas/sklearn.
+
+3. **Timeout del LLM**: 60 segundos. El endpoint puede tardar en responder dependiendo del LLM.
+
+4. **Costo**: OpenRouter tiene tier gratuito para MiniMax 2.5. El costo debería ser $0 o muy bajo para la PoC.
+
+5. **RAG simple**: El contexto se genera fresh en cada request (no hay vector store). Para una PoC está bien, pero en producción se podría cachear el contexto o usar embeddings.
+
+---
+
+### Checklist de Implementación
+
+| Paso | Descripción | Estado |
+|------|-------------|--------|
+| 9.1 | Crear `challenge/ai_insights.py` | ⏳ pending |
+| 9.2 | Modificar `challenge/api.py` (agregar endpoint) | ⏳ pending |
+| 9.3 | Crear `tests/ai/test_ai_insights.py` | ⏳ pending |
+| 9.4 | Agregar `polars` y `httpx` a `requirements.txt` | ⏳ pending |
+| 9.5 | Agregar `make ai-test` al Makefile | ⏳ pending |
+| 9.6 | Agregar AI tests al CI workflow | ⏳ pending |
+| 9.7 | Configurar `OPENROUTER_API_KEY` en GitHub Secrets | ⏳ pending |
+| 9.8 | Testear endpoint localmente | ⏳ pending |
+| 9.9 | Push y verificar CI/CD | ⏳ pending |
+
+---
+
+### Notas sobre OpenRouter y MiniMax
+
+**OpenRouter** es un aggregator que permite acceder a múltiples LLMs con una API unificada. MiniMax 2.5 es uno de los modelos disponibles en su catálogo.
+
+**Endpoints disponibles:**
+- Chat completions: `POST https://openrouter.ai/api/v1/chat/completions`
+- Models list: `GET https://openrouter.ai/api/v1/models`
+
+**Model ID para MiniMax:** `minimax/minimax-2.5`
+
+**Rate limits (tier gratuito):**
+- 50 requests/minuto
+- 5000 requests/día
+
+Para la PoC es más que suficiente.
+
+---
+
+## Resumen de Cambios
+
+```
+NEW FILES:
+  challenge/ai_insights.py       (core logic)
+  tests/ai/test_ai_insights.py   (unit tests)
+
+MODIFIED FILES:
+  challenge/api.py               (+ /ai-insights endpoint)
+  requirements.txt               (+ polars, httpx)
+  Makefile                       (+ ai-test target)
+  .github/workflows/ci.yml       (+ AI tests in pipeline)
+
+NEW SECRETS:
+  OPENROUTER_API_KEY            (GitHub Secrets)
+
+NEW ENDPOINT:
+  POST /ai-insights             (AI-powered flight delay analysis)
+```
+
+---
+
+**Nota:** Este feature es una PoC. No se espera que sea production-ready (sin caching, sin rate limiting en el LLM, sin retry logic robusto). El objetivo es demostrar el concepto de RAG con datos de vuelos y MiniMax.
