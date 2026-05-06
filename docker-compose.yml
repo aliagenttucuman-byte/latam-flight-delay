@@ -1,0 +1,15 @@
+# Docker Compose for local development with hot-reload
+# Changes from original: file didn't exist
+# See: Plan_Ejecucion.md section "Cambios Realizados vs Original"
+version: '3.8'
+
+services:
+  api:
+    build: .
+    ports:
+      - "8000:8000"
+    volumes:
+      - .:/app
+    environment:
+      - PYTHONUNBUFFERED=1
+    command: uvicorn challenge.api:app --host 0.0.0.0 --port 8000 --reload

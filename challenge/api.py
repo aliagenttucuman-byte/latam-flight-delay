@@ -1,0 +1,177 @@
+from __future__ import annotations
+
+# Changes from original:
+#   - Using @validator instead of @field_validator (Pydantic 1.10.2 compatibility, not v2)
+#   - See: Plan_Ejecucion.md section "Cambios Realizados vs Original"
+from fastapi import FastAPI, HTTPException, status
+from fastapi.responses import JSONResponse
+from fastapi.exceptions import RequestValidationError
+from pydantic import BaseModel, Field, validator, ValidationError
+from typing import Annotated, List, Dict, Any
+
+import pandas as pd
+import numpy as np
+
+
+VALID_OPERAS: List[str] = [
+    "American Airlines", "Air France", "Aerolineas Argentinas",
+    "Avianca", "British Airways", "Copa Air", "Delta Air",
+    "Grupo LATAM", "Iberia", "JetSmart", "Korean Air",
+    "LATAM", "Latin American Wings", "Lloyd Aereo Boliviano",
+    "Sky Airline", "United Airlines"
+]
+
+VALID_TIPOVUELO: List[str] = ["I", "N"]
+VALID_MES: List[int] = list(range(1, 13))
+
+
+class Flight(BaseModel):
+    """Flight data model with validation."""
+
+    OPERA: Annotated[
+        str,
+        Field(
+            min_length=1,
+            max_length=100,
+            description="Airline name (e.g., 'Aerolineas Argentinas', 'Grupo LATAM')"
+        )
+    ]
+    TIPOVUELO: Annotated[
+        str,
+        Field(
+            pattern="^[IN]$",
+            description="Flight type: I=International, N=National"
+        )
+    ]
+    MES: Annotated[
+        int,
+        Field(
+            ge=1,
+            le=12,
+            description="Month of the year (1-12)"
+        )
+    ]
+
+    @validator("OPERA")
+    @classmethod
+    def validate_opera(cls, v: str) -> str:
+        if v not in VALID_OPERAS:
+            raise ValueError(
+                f"Invalid OPERA '{v}'. Must be one of: {', '.join(sorted(VALID_OPERAS))}"
+            )
+        return v
+
+    @validator("TIPOVUELO")
+    @classmethod
+    def validate_tipovuelo(cls, v: str) -> str:
+        if v not in VALID_TIPOVUELO:
+            raise ValueError(
+                f"Invalid TIPOVUELO '{v}'. Must be one of: {', '.join(VALID_TIPOVUELO)}"
+            )
+        return v
+
+    @validator("MES")
+    @classmethod
+    def validate_mes(cls, v: int) -> int:
+        if v not in VALID_MES:
+            raise ValueError(
+                f"Invalid MES '{v}'. Must be one of: {', '.join(map(str, VALID_MES))}"
+            )
+        return v
+
+
+class FlightBatch(BaseModel):
+    flights: List[Flight]
+
+
+app = FastAPI(
+    title="Flight Delay Prediction API",
+    description="API for predicting flight delays at SCL airport using XGBoost",
+    version="1.0.0"
+)
+
+
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request, exc):
+    return JSONResponse(
+        status_code=status.HTTP_400_BAD_REQUEST,
+        content={"detail": str(exc.errors())}
+    )
+
+
+_model: Any = None
+
+
+def load_model() -> Any:
+    """Load and fit the DelayModel on startup (lazy initialization)."""
+    global _model
+
+    if _model is not None:
+        return _model
+
+    from challenge.model import DelayModel
+
+    model = DelayModel()
+
+    data = pd.read_csv("data/data.csv")
+
+    features, target = model.preprocess(data, target_column="delay")
+    model.fit(features, target)
+
+    _model = model
+    return _model
+
+
+@app.get("/health")
+async def get_health() -> Dict[str, str]:
+    """Health check endpoint."""
+    return {"status": "OK"}
+
+
+@app.post(
+    "/predict",
+    response_model=Dict[str, List[int]],
+    status_code=status.HTTP_200_OK,
+    responses={
+        400: {"description": "Validation error - invalid flight data"},
+        500: {"description": "Internal server error during prediction"}
+    }
+)
+async def predict(batch: FlightBatch) -> Dict[str, List[int]]:
+    """Predict flight delays for a batch of flights.
+
+    Args:
+        batch: Batch of flights containing OPERA, TIPOVUELO, MES.
+
+    Returns:
+        Dict with 'predict' key containing list of predictions (0 or 1).
+
+    Raises:
+        HTTPException 400: If any flight data fails validation.
+        HTTPException 500: If prediction fails.
+    """
+    try:
+        model = load_model()
+
+        flight_dicts = [
+            {"OPERA": flight.OPERA, "TIPOVUELO": flight.TIPOVUELO, "MES": flight.MES}
+            for flight in batch.flights
+        ]
+        flights_df = pd.DataFrame(flight_dicts)
+
+        features = model.preprocess(flights_df)
+
+        predictions = model.predict(features)
+
+        return {"predict": predictions}
+
+    except (ValueError, ValidationError) as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Invalid data: {str(e)}"
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Prediction error: {str(e)}"
+        )
