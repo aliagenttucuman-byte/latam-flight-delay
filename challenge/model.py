@@ -182,7 +182,6 @@ class DelayModel:
             random_state=42,
             learning_rate=0.01,
             scale_pos_weight=scale_pos_weight,
-            use_label_encoder=False,
             eval_metric="logloss"
         )
         self._model.fit(features, y)

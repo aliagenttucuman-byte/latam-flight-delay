@@ -113,7 +113,7 @@ def load_model() -> Any:
 
     model = DelayModel()
 
-    data = pd.read_csv("data/data.csv")
+    data = pd.read_csv("data/data.csv", low_memory=False)
 
     features, target = model.preprocess(data, target_column="delay")
     model.fit(features, target)

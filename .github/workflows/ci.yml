@@ -16,8 +16,13 @@ jobs:
         with:
           python-version: '3.11'
       - name: Install dependencies
-        run: make install
-      - name: Run model tests
-        run: make model-test
+        run: |
+          pip install -r requirements.txt
+          pip install -r requirements-test.txt
+          pip install -r requirements-dev.txt
       - name: Run API tests
-        run: make api-test
+        run: python -m pytest tests/api/test_api.py -v
+      - name: Run Model tests
+        run: |
+          cd tests/model
+          python -m pytest test_model.py -v
