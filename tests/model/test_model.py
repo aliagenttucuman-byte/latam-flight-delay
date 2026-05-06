@@ -1,3 +1,4 @@
+import os
 import unittest
 import pandas as pd
 
@@ -8,7 +9,7 @@ from challenge.model import DelayModel
 class TestModel(unittest.TestCase):
 
     FEATURES_COLS = [
-        "OPERA_Latin American Wings", 
+        "OPERA_Latin American Wings",
         "MES_7",
         "MES_10",
         "OPERA_Grupo LATAM",
@@ -28,7 +29,8 @@ class TestModel(unittest.TestCase):
     def setUp(self) -> None:
         super().setUp()
         self.model = DelayModel()
-        self.data = pd.read_csv(filepath_or_buffer="data/data.csv", low_memory=False)
+        csv_path = os.path.join(os.path.dirname(__file__), "..", "..", "data", "data.csv")
+        self.data = pd.read_csv(filepath_or_buffer=csv_path, low_memory=False)
         
 
     def test_model_preprocess_for_training(
