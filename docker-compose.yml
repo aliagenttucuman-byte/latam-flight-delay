@@ -12,4 +12,5 @@ services:
       - .:/app
     environment:
       - PYTHONUNBUFFERED=1
+      - OPENROUTER_API_KEY=sk-EASBo2tbnYoiDUKhAqGaam4b3KzeMriB9hAge72K5PF9h5SDHhOl4X6Acf5bEtHu
     command: uvicorn challenge.api:app --host 0.0.0.0 --port 8000 --reload
