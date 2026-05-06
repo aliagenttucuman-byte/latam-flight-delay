@@ -30,5 +30,3 @@ jobs:
             --allow-unauthenticated \
             --memory 512M \
             --cpu 1
-      - name: Output URL
-        run: echo "Deployed URL: $$(gcloud run services describe delay-model-api --region $${{ secrets.GCP_REGION }} --format 'value(status.url)')"
