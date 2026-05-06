@@ -6,7 +6,7 @@ from __future__ import annotations
 from fastapi import FastAPI, HTTPException, status
 from fastapi.responses import JSONResponse
 from fastapi.exceptions import RequestValidationError
-from pydantic import BaseModel, Field, validator, ValidationError
+from pydantic import BaseModel, Field, field_validator, ValidationError
 from typing import Annotated, List, Dict, Any
 
 import pandas as pd
@@ -52,7 +52,7 @@ class Flight(BaseModel):
         )
     ]
 
-    @validator("OPERA")
+    @field_validator("OPERA")
     @classmethod
     def validate_opera(cls, v: str) -> str:
         if v not in VALID_OPERAS:
@@ -61,7 +61,7 @@ class Flight(BaseModel):
             )
         return v
 
-    @validator("TIPOVUELO")
+    @field_validator("TIPOVUELO")
     @classmethod
     def validate_tipovuelo(cls, v: str) -> str:
         if v not in VALID_TIPOVUELO:
@@ -70,7 +70,7 @@ class Flight(BaseModel):
             )
         return v
 
-    @validator("MES")
+    @field_validator("MES")
     @classmethod
     def validate_mes(cls, v: int) -> int:
         if v not in VALID_MES:
