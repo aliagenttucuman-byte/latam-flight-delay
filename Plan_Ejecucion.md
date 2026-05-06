@@ -1604,8 +1604,8 @@ User Question → Polars extrae stats del CSV → LLM (MiniMax via OpenRouter) �
 ┌─────────────────────────────────────────────────────────────────────┐
 │                    LLM (MiniMax 2.5 via OpenRouter)                  │
 │                                                                      │
-│  Model: minimax/minimax-2.5                                          │
-│  API: https://openrouter.ai/api/v1/chat/completions                  │
+│  Model: claude-sonnet-4                                          │
+│  API: https://opencode.ai/zen/v1/chat/completions                  │
 │  System Role: "Data analyst expert, responds in Spanish"            │
 │  Context: Stats extracted by Polars (delay rates, patterns, etc)     │
 └─────────────────────────────────────────────────────────────────────┘
@@ -1736,7 +1736,7 @@ import polars as pl
 
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
-DEFAULT_MODEL = "minimax/minimax-2.5"
+DEFAULT_MODEL = "claude-sonnet-4"
 
 SYSTEM_PROMPT = """Eres un analista de datos experto en retrasos de vuelos del aeropuerto SCL (Santiago de Chile).
 
@@ -1990,7 +1990,7 @@ import polars as pl
 
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
-DEFAULT_MODEL = "minimax/minimax-2.5"
+DEFAULT_MODEL = "claude-sonnet-4"
 
 SYSTEM_PROMPT = """Eres un analista de datos experto en retrasos de vuelos del aeropuerto SCL (Santiago de Chile).
 
