@@ -10,7 +10,7 @@ import polars as pl
 
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
 OPENROUTER_URL = "https://opencode.ai/zen/v1/chat/completions"
-DEFAULT_MODEL = "minimax-2.7"
+DEFAULT_MODEL = "minimax"
 
 SYSTEM_PROMPT = """Eres un analista de datos experto en retrasos de vuelos del aeropuerto SCL (Santiago de Chile).
 
