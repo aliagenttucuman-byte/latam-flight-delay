@@ -20,6 +20,7 @@ jobs:
           pip install -r requirements.txt
           pip install -r requirements-test.txt
           pip install -r requirements-dev.txt
+          pip install "starlette>=0.27.0,<0.30.0" "anyio>=3.7.0,<4.0.0"
       - name: Run API tests
         run: python -m pytest tests/api/test_api.py -v
       - name: Run Model tests
