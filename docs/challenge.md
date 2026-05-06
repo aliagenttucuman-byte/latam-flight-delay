@@ -79,16 +79,28 @@ Per README.md instructions ("create extra classes and methods" and "apply all go
 
 | File | Change | Justification |
 |------|--------|---------------|
-| `requirements.txt` | Updated numpy, pandas (Python 3.11 compatibility), added xgboost | Original versions don't compile on Python 3.11 |
-| `Dockerfile` | Completed (was empty skeleton) | Required to make challenge executable |
+| `requirements.txt` | Updated to FastAPI 0.115+, Pydantic 2.x, uvicorn 0.30+ | httpx 1.0+ broke testclient compatibility with old starlette; upgrade ecosystem |
+| `challenge/api.py` | Used `@field_validator` instead of `@validator` | Pydantic 2.x syntax (original used Pydantic 1.10.2 `@validator`) |
+| `Dockerfile` | Completed (was empty skeleton), uses PORT=8080 | Cloud Run requirement; original skeleton wouldn't deploy |
 | `docker-compose.yml` | Created | Development workflow with hot-reload |
-| `challenge/api.py` | Used `@validator` instead of `@field_validator` | Pydantic 1.10.2 compatibility |
+| `model.py` | Removed `use_label_encoder=True` | Deprecated parameter in XGBoost 1.5+ |
 
 All changes are documented with inline comments referencing `Plan_Ejecucion.md` section "Cambios Realizados vs Original" for full audit trail.
 
 ---
 
 ## Deployment
+
+### Deployed API
+
+**Production URL:** `https://delay-model-api-chxpmithta-rj.a.run.app`
+
+**Test endpoint:**
+```bash
+curl -X POST "https://delay-model-api-chxpmithta-rj.a.run.app/predict" \
+  -H "Content-Type: application/json" \
+  -d '{"flights":[{"OPERA":"Grupo LATAM","TIPOVUELO":"I","MES":7}]}'
+```
 
 ### Local Development
 
@@ -108,13 +120,17 @@ gcloud run deploy delay-model-api \
   --source . \
   --region southamerica-east1 \
   --platform managed \
-  --allow-unauthenticated
+  --allow-unauthenticated \
+  --memory 512M \
+  --cpu 1
 ```
 
 ### CI/CD
 
 - **CI Workflow** (`.github/workflows/ci.yml`): Runs model and API tests on push/PR
 - **CD Workflow** (`.github/workflows/cd.yml`): Deploys to Cloud Run on merge to main
+
+**Important:** Cloud Run expects containers to listen on `PORT=8080` (injected automatically). Ensure Dockerfile exposes port 8080 and uvicorn runs on that port.
 
 ---
 
@@ -167,3 +183,75 @@ Client Request → FastAPI Validation → load_model() (lazy singleton) → Pred
 - Stress test results: Above in this document
 - Model code: `challenge/model.py`
 - API code: `challenge/api.py`
+
+---
+
+## CD Deployment Errors Log (2026-05-06)
+
+During first GitHub Actions deployment to GCP Cloud Run, the following errors occurred and were resolved:
+
+### Error 1: YAML Syntax Error
+
+GitHub Actions `run:` blocks interpret `$()` as template syntax, not shell. `$(gcloud ...)` in `run:` caused YAML parse error.
+
+**Fix:** Remove problematic steps or escape with `$$`.
+
+### Error 2: SA Lacked Permission for `gcloud services enable`
+
+`gcloud.services.enable` requires specific roles the SA didn't have.
+
+**Fix:** APIs were already enabled. Remove `gcloud services enable` from workflow.
+
+### Error 3: Artifact Registry Repo Missing
+
+`gcloud run deploy --source .` requires `cloud-run-source-deploy` repo in Artifact Registry.
+
+**Fix:** Create repo manually:
+```bash
+gcloud artifacts repositories create cloud-run-source-deploy \
+  --repository-format=docker --location=southamerica-east1
+```
+
+### Error 4: Cloud Build SA Needed Artifact Registry Permissions
+
+`--source .` uses Cloud Build internally. Cloud Build SA (`32555940559@cloudbuild.gserviceaccount.com`) needs `artifactregistry.writer` on the repo.
+
+**Fix:**
+```bash
+gcloud artifacts repositories add-iam-policy-binding cloud-run-source-deploy \
+  --location=southamerica-east1 \
+  --member="serviceAccount:32555940559@cloudbuild.gserviceaccount.com" \
+  --role="roles/artifactregistry.writer"
+gcloud projects add-iam-policy-binding latam-flight-delay \
+  --member="serviceAccount:32555940559@cloudbuild.gserviceaccount.com" \
+  --role="roles/run.admin"
+```
+
+### Error 5: GitHub Actions SA Needed `cloudbuild.builds.builder`
+
+**Fix:**
+```bash
+gcloud projects add-iam-policy-binding latam-flight-delay \
+  --member="serviceAccount:github-actions@latam-flight-delay.iam.gserviceaccount.com" \
+  --role="roles/cloudbuild.builds.builder"
+```
+
+### Error 6: Dockerfile PORT Mismatch
+
+Cloud Run injects `PORT=8080`. Original Dockerfile used port 8000, causing container startup failure.
+
+**Fix:** Update Dockerfile:
+```dockerfile
+EXPOSE 8080
+ENV PORT=8080
+CMD ["uvicorn", "challenge.api:app", "--host", "0.0.0.0", "--port", "8080"]
+```
+
+### IAM Roles Summary
+
+| Service Account | Resource | Role |
+|-----------------|----------|------|
+| `github-actions@...` | Project | `artifactregistry.admin`, `artifactregistry.writer`, `cloudbuild.builds.builder`, `run.admin` |
+| `github-actions@...` | Repo `cloud-run-source-deploy` | `artifactregistry.admin`, `artifactregistry.writer` |
+| `32555940559@cloudbuild.gserviceaccount.com` | Repo `cloud-run-source-deploy` | `artifactregistry.writer` |
+| `32555940559@cloudbuild.gserviceaccount.com` | Project | `run.admin` |
