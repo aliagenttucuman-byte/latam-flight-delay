@@ -1367,3 +1367,200 @@ python -m locust -f tests/stress/api_stress.py --print-stats --headless --users 
 ```
 
 Cada fase depende de la anterior. La Fase 5 (CI/CD) puede desarrollarse en paralelo con otras.
+
+---
+
+## CD Deployment Errors Log (2026-05-06)
+
+Errores encontrados durante el primer deploy a GCP Cloud Run desde GitHub Actions y sus soluciones.
+
+### Error 1: YAML Syntax Error in cd.yml
+
+**Mensaje:**
+```
+You have an error in your yaml syntax on line 34
+Invalid workflow file
+```
+
+**Causa:** El step `Output URL` usaba `$(...)` dentro del `run:` block. GitHub Actions interpreta `$` como variable de template, no como shell.
+
+**Fix aplicado en cd.yml:**
+```yaml
+# ANTES (error):
+- name: Output URL
+  run: echo "Deployed URL: $(gcloud run services describe...)"
+
+# DESPUES (eliminado):
+# Se removió el step problemático
+```
+
+**Lección:** No usar `$(...)` directamente en `run:` blocks de GitHub Actions. Usar `$$` para escapar o evitar estos commands.
+
+---
+
+### Error 2: SA Lacks Permission for `gcloud services enable`
+
+**Mensaje:**
+```
+ERROR: (gcloud.services.enable) PERMISSION_DENIED: Permission denied to enable service [run.googleapis.com]
+```
+
+**Causa:** El SA `github-actions@latam-flight-delay.iam.gserviceaccount.com` no tenía rol para habilitar APIs.
+
+**Fix:** Remover `gcloud services enable run.googleapis.com` del cd.yml. La API ya estaba habilitada desde la consola.
+
+**Lección:** En cuentas gratuitas, las APIs ya pueden estar habilitadas. No es necesario habilitarlas en el workflow.
+
+---
+
+### Error 3: Artifact Registry Repository Does Not Exist
+
+**Mensaje:**
+```
+Deploying from source requires an Artifact Registry Docker repository to store built containers.
+A repository named [cloud-run-source-deploy] in region [***] will be created.
+ERROR: (gcloud.run.deploy) PERMISSION_DENIED: The caller does not have permission.
+```
+
+**Causa:** El repo `cloud-run-source-deploy` no existía, y cuando GitHub Actions intentaba crearlo, fallaba por permisos.
+
+**Fix:** Crear el repo manualmente desde CLI:
+```bash
+gcloud artifacts repositories create cloud-run-source-deploy \
+  --repository-format=docker \
+  --location=southamerica-east1 \
+  --project=latam-flight-delay
+```
+
+**Lección:** `--source .` en `gcloud run deploy` necesita un Artifact Registry existente. Crearlo manualmente antes del primer deploy.
+
+---
+
+### Error 4: Cloud Build SA Lacked Artifact Registry Permissions
+
+**Mensaje:**
+```
+ERROR: (gcloud.run.deploy) PERMISSION_DENIED: Permission 'artifactregistry.repositories.get' denied
+on resource '//artifactregistry.googleapis.com/projects/***/locations/***/repositories/cloud-run-source-deploy'
+```
+
+**Causa:** `gcloud run deploy --source .` internamente usa Cloud Build para construir la imagen. El SA de Cloud Build (`32555940559@cloudbuild.gserviceaccount.com`) necesitaba permisos en el repo de Artifact Registry.
+
+**Fix:**
+```bash
+# Permisos para Cloud Build SA en el repo
+gcloud artifacts repositories add-iam-policy-binding cloud-run-source-deploy \
+  --location=southamerica-east1 \
+  --member="serviceAccount:32555940559@cloudbuild.gserviceaccount.com" \
+  --role="roles/artifactregistry.writer"
+
+# Permisos para Cloud Build SA en el proyecto
+gcloud projects add-iam-policy-binding latam-flight-delay \
+  --member="serviceAccount:32555940559@cloudbuild.gserviceaccount.com" \
+  --role="roles/run.admin"
+```
+
+**Lección:** Cuando se usa `--source .`, Cloud Build (no el SA de GitHub Actions) hace el build y push. Cloud Build necesita permisos tanto en Artifact Registry como en Cloud Run.
+
+---
+
+### Error 5: GitHub Actions SA Lacked `cloudbuild.builds.builder` Role
+
+**Mensaje:**
+```
+ERROR: (gcloud.run.deploy) The caller does not have permission.
+Authentication: github-actions@...iam.gserviceaccount.com
+```
+
+**Causa:** El SA de GitHub Actions también necesitaba el rol `cloudbuild.builds.builder` para poder crear Cloud Build jobs.
+
+**Fix:**
+```bash
+gcloud projects add-iam-policy-binding latam-flight-delay \
+  --member="serviceAccount:github-actions@latam-flight-delay.iam.gserviceaccount.com" \
+  --role="roles/cloudbuild.builds.builder"
+```
+
+**Lección:** Aunque el SA de GitHub Actions usa credenciales de Cloud Build internamente, necesita el rol `cloudbuild.builds.builder` para solicitar la construcción del contenedor.
+
+---
+
+### Error 6: Dockerfile Container Port Mismatch
+
+**Mensaje:**
+```
+ERROR: The user-provided container failed to start and listen on the port defined provided
+by the PORT=8080 environment variable within the allocated timeout.
+```
+
+**Causa:** Cloud Run define automáticamente `PORT=8080` y espera que el contenedor escuche en ese puerto. El Dockerfile usaba puerto 8000.
+
+**Fix en Dockerfile:**
+```dockerfile
+# ANTES:
+EXPOSE 8000
+CMD ["uvicorn", "challenge.api:app", "--host", "0.0.0.0", "--port", "8000"]
+
+# DESPUES:
+EXPOSE 8080
+ENV PORT=8080
+CMD ["uvicorn", "challenge.api:app", "--host", "0.0.0.0", "--port", "8080"]
+```
+
+**Lección:** Cloud Run siempre inyecta `PORT=8080`. El contenedor DEBE escuchar en ese puerto.
+
+---
+
+## Resumen de Roles IAM Configurados
+
+| Service Account | Recurso | Rol |
+|----------------|---------|-----|
+| `github-actions@...` | Proyecto | `artifactregistry.admin` |
+| `github-actions@...` | Proyecto | `artifactregistry.writer` |
+| `github-actions@...` | Proyecto | `cloudbuild.builds.builder` |
+| `github-actions@...` | Proyecto | `iam.serviceAccountUser` |
+| `github-actions@...` | Proyecto | `run.admin` |
+| `github-actions@...` | Proyecto | `storage.objectViewer` |
+| `github-actions@...` | Repo `cloud-run-source-deploy` | `artifactregistry.admin` |
+| `github-actions@...` | Repo `cloud-run-source-deploy` | `artifactregistry.writer` |
+| `32555940559@cloudbuild.gserviceaccount.com` | Repo `cloud-run-source-deploy` | `artifactregistry.writer` |
+| `32555940559@cloudbuild.gserviceaccount.com` | Proyecto | `run.admin` |
+
+---
+
+## cd.yml Final (Working Version)
+
+```yaml
+name: 'Continuous Delivery'
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Authenticate to GCP
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+      - name: Set up GCP
+        run: gcloud config set project ${{ secrets.GCP_PROJECT_ID }}
+      - name: Deploy to Cloud Run
+        run: |
+          gcloud run deploy delay-model-api \
+            --source . \
+            --region ${{ secrets.GCP_REGION }} \
+            --platform managed \
+            --allow-unauthenticated \
+            --memory 512M \
+            --cpu 1
+```
+
+**Nota:** Se removió `gcloud services enable` y `Output URL` step para evitar errores de permisos y sintaxis.
