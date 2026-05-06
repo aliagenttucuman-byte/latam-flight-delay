@@ -1,6 +1,7 @@
 locust>=2.15.0
 coverage>=6.0
 pytest>=7.0
+pytest-asyncio>=0.21.0
 pytest-cov>=4.0
 mockito>=1.4
 httpx>=0.24.0
