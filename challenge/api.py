@@ -182,7 +182,23 @@ async def predict(batch: FlightBatch) -> Dict[str, List[int]]:
 
 class AIInsightRequest(BaseModel):
     """Request model for AI insights endpoint."""
-    question: str
+
+    question: Annotated[
+        str,
+        Field(
+            description="Question about flight delays. Example questions:",
+            examples=[
+                "¿Por qué se retrasan los vuelos?",
+                "¿Cuál es la aerolinea con más retrasos?",
+                "¿Cuál es el peor mes para volar?",
+                "¿Los vuelos internacionales tienen más retrasos que los nacionales?",
+                "¿Qué combinación de aerolinea y mes es más problemática?",
+                "¿Cuántos vuelos se analizaron?",
+                "¿Cuál es la tasa de retrasos general?",
+                "¿Cuál es el mejor mes para volar?"
+            ]
+        )
+    ]
 
 
 @app.post(
