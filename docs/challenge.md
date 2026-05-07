@@ -280,6 +280,28 @@ jobs:
 
 This satisfies the challenge requirement: "*It is highly recommended to use GitFlow development practices.*"
 
+### CI/CD Optimization: `paths-ignore`
+
+To avoid unnecessary deployments when only documentation changes are made, the workflows include `paths-ignore` for files that do not affect the application behavior:
+
+```yaml
+on:
+  push:
+    branches: [develop]
+    paths-ignore:
+      - 'docs/**'
+      - '*.md'
+      - 'README*'
+      - 'LICENSE'
+      - '.gitignore'
+```
+
+| Change Type | CI | CD |
+|-------------|----|----|
+| Only `docs/*.md` | ❌ Skip | ❌ Skip |
+| Only `README.md` | ❌ Skip | ❌ Skip |
+| `api.py` + `README.md` | ✅ Runs | ✅ Runs |
+
 ### GitHub Secrets Required
 
 | Secret | Value | Purpose |
