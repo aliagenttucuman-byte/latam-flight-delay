@@ -4,7 +4,8 @@ from __future__ import annotations
 #   - Using @validator instead of @field_validator (Pydantic 1.10.2 compatibility, not v2)
 #   - See: Plan_Ejecucion.md section "Cambios Realizados vs Original"
 from fastapi import FastAPI, HTTPException, status
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, RedirectResponse, FileResponse
+from fastapi.staticfiles import StaticFiles
 from fastapi.exceptions import RequestValidationError
 from pydantic import BaseModel, Field, field_validator, ValidationError
 from typing import Annotated, List, Dict, Any, Optional
@@ -233,3 +234,6 @@ async def ai_insights(request: AIInsightRequest) -> Dict[str, Any]:
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=str(e)
         )
+
+
+app.mount("/", StaticFiles(directory="static", html=True), name="static")
