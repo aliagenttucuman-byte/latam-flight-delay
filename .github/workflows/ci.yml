@@ -3,8 +3,20 @@ name: 'Continuous Integration'
 on:
   push:
     branches: [main, develop, 'feature/**']
+    paths-ignore:
+      - 'docs/**'
+      - '*.md'
+      - 'README*'
+      - 'LICENSE'
+      - '.gitignore'
   pull_request:
     branches: [main, develop]
+    paths-ignore:
+      - 'docs/**'
+      - '*.md'
+      - 'README*'
+      - 'LICENSE'
+      - '.gitignore'
 
 jobs:
   test:
