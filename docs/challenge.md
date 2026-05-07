@@ -3,7 +3,7 @@
 **Challenge:** Software Engineer (ML & LLMs) — LAN LATAM  
 **Repository:** https://github.com/aliagenttucuman-byte/latam-flight-delay  
 **Production URL:** https://delay-model-api-chxpmithta-rj.a.run.app  
-**Status:** Complete and Deployed
+**Status:** Complete and Deployed ✓
 
 ---
 
