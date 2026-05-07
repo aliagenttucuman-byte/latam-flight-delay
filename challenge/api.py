@@ -3,7 +3,7 @@ from __future__ import annotations
 # Changes from original:
 #   - Using @validator instead of @field_validator (Pydantic 1.10.2 compatibility, not v2)
 #   - See: Plan_Ejecucion.md section "Cambios Realizados vs Original"
-from fastapi import FastAPI, HTTPException, status
+from fastapi import FastAPI, HTTPException, status, Request
 from fastapi.responses import JSONResponse, RedirectResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
@@ -13,9 +13,26 @@ from typing import Annotated, List, Dict, Any, Optional
 
 import pandas as pd
 import numpy as np
+import logging
+import time
+import os
 
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.util import get_remote_address
+from slowapi.errors import RateLimitExceeded
 
 from challenge.ai_insights import get_ai_insight
+
+# Configure structured logging
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S"
+)
+logger = logging.getLogger(__name__)
+
+# Rate limiter: key by remote address
+limiter = Limiter(key_func=get_remote_address)
 
 
 VALID_OPERAS: List[str] = [
@@ -92,8 +109,10 @@ class FlightBatch(BaseModel):
 app = FastAPI(
     title="Flight Delay Prediction API",
     description="API for predicting flight delays at SCL airport using XGBoost",
-    version="1.0.0"
+    version="1.1.0"
 )
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 app.add_middleware(
     CORSMiddleware,
@@ -106,6 +125,7 @@ app.add_middleware(
 
 @app.exception_handler(RequestValidationError)
 async def validation_exception_handler(request, exc):
+    logger.warning(f"Validation error: {exc.errors()} | Path: {request.url.path}")
     return JSONResponse(
         status_code=status.HTTP_400_BAD_REQUEST,
         content={"detail": str(exc.errors())}
@@ -122,6 +142,9 @@ def load_model() -> Any:
     if _model is not None:
         return _model
 
+    logger.info("Loading model...")
+    start = time.time()
+
     from challenge.model import DelayModel
 
     model = DelayModel()
@@ -132,13 +155,21 @@ def load_model() -> Any:
     model.fit(features, target)
 
     _model = model
+    elapsed = time.time() - start
+    logger.info(f"Model loaded and trained in {elapsed:.2f}s")
     return _model
 
 
 @app.get("/health")
-async def get_health() -> Dict[str, str]:
+@limiter.limit("60/minute")
+async def get_health(request: Request) -> Dict[str, Any]:
     """Health check endpoint."""
-    return {"status": "OK"}
+    logger.info(f"Health check | Client: {request.client.host if request.client else 'unknown'}")
+    return {
+        "status": "OK",
+        "model_loaded": _model is not None,
+        "version": "1.1.0"
+    }
 
 
 @app.post(
@@ -147,10 +178,12 @@ async def get_health() -> Dict[str, str]:
     status_code=status.HTTP_200_OK,
     responses={
         400: {"description": "Validation error - invalid flight data"},
+        429: {"description": "Rate limit exceeded"},
         500: {"description": "Internal server error during prediction"}
     }
 )
-async def predict(batch: FlightBatch) -> Dict[str, List[int]]:
+@limiter.limit("30/minute")
+async def predict(request: Request, batch: FlightBatch) -> Dict[str, List[int]]:
     """Predict flight delays for a batch of flights.
 
     Args:
@@ -161,8 +194,13 @@ async def predict(batch: FlightBatch) -> Dict[str, List[int]]:
 
     Raises:
         HTTPException 400: If any flight data fails validation.
+        HTTPException 429: If rate limit exceeded.
         HTTPException 500: If prediction fails.
     """
+    client = request.client.host if request.client else "unknown"
+    logger.info(f"Predict request | Flights: {len(batch.flights)} | Client: {client}")
+    start = time.time()
+
     try:
         model = load_model()
 
@@ -176,14 +214,19 @@ async def predict(batch: FlightBatch) -> Dict[str, List[int]]:
 
         predictions = model.predict(features)
 
+        elapsed = time.time() - start
+        logger.info(f"Predict completed | Flights: {len(batch.flights)} | Time: {elapsed:.3f}s | Client: {client}")
+
         return {"predict": predictions}
 
     except (ValueError, ValidationError) as e:
+        logger.warning(f"Predict validation error | Client: {client} | Error: {e}")
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Invalid data: {str(e)}"
         )
     except Exception as e:
+        logger.error(f"Predict error | Client: {client} | Error: {e}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Prediction error: {str(e)}"
@@ -217,40 +260,54 @@ class AIInsightRequest(BaseModel):
     status_code=status.HTTP_200_OK,
     responses={
         400: {"description": "Invalid question"},
+        429: {"description": "Rate limit exceeded"},
         500: {"description": "LLM call failed"}
     }
 )
-async def ai_insights(request: AIInsightRequest) -> Dict[str, Any]:
+@limiter.limit("10/minute")
+async def ai_insights(request: Request, body: AIInsightRequest) -> Dict[str, Any]:
     """Get AI-powered insights about flight delays.
 
     Uses Polars to extract context from data.csv (precomputed at build time)
     and MiniMax LLM to generate conversational analysis.
 
     Args:
-        request: Contains the question to ask about the data.
+        body: Contains the question to ask about the data.
 
     Returns:
         Dict with 'insight' key containing the LLM response.
 
     Raises:
+        HTTPException 429: If rate limit exceeded.
         HTTPException 500: If LLM call fails.
     """
+    client = request.client.host if request.client else "unknown"
+    logger.info(f"AI insights request | Question: {body.question[:50]}... | Client: {client}")
+    start = time.time()
+
     try:
-        result = await get_ai_insight(request.question)
+        result = await get_ai_insight(body.question)
+        elapsed = time.time() - start
+        logger.info(f"AI insights completed | Time: {elapsed:.2f}s | Client: {client}")
         return result
     except Exception as e:
+        logger.error(f"AI insights error | Client: {client} | Error: {e}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=str(e)
         )
 
 
-import os
-
 static_dir = os.path.join(os.path.dirname(__file__), "..", "static")
 
+@app.on_event("startup")
+async def startup_event():
+    """Log startup info."""
+    logger.info("API starting up | Version: 1.1.0")
+
 @app.get("/")
-async def root():
+@limiter.limit("60/minute")
+async def root(request: Request):
     """Serve the React UI."""
     index_path = os.path.join(static_dir, "index.html") if os.path.isdir(static_dir) else None
     if index_path and os.path.isfile(index_path):
