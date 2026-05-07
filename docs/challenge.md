@@ -3,7 +3,7 @@
 **Challenge:** Software Engineer (ML & LLMs) — LAN LATAM  
 **Repository:** https://github.com/aliagenttucuman-byte/latam-flight-delay  
 **Production URL:** https://delay-model-api-chxpmithta-rj.a.run.app  
-**Status:** Complete and Deployed ✓
+**Status:** Complete and Deployed ✓ | **Version:** v1.1.0
 
 ---
 
@@ -98,8 +98,9 @@ make model-test
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
-| `/health` | GET | Health check — returns `{"status": "OK"}` |
+| `/health` | GET | Health check — returns `{"status": "OK", "model_loaded": true, "version": "1.1.0"}` |
 | `/predict` | POST | Predict delay probability for a batch of flights |
+| `/ai-insights` | POST | AI-powered conversational insights about flight delays |
 
 ### Request / Response Format
 
@@ -147,10 +148,44 @@ def load_model() -> Any:
 
 This avoids consuming memory at startup if the API is only used for health checks.
 
+### Rate Limiting
+
+To protect the API from abuse (especially the LLM-powered `/ai-insights` endpoint which incurs external API costs), `slowapi` is configured with per-endpoint limits keyed by client IP:
+
+| Endpoint | Limit | Rationale |
+|----------|-------|-----------|
+| `/health` | 60/minute | Health checks should be frequent but not a DoS vector |
+| `/` | 60/minute | UI serving — same rationale as health |
+| `/predict` | 30/minute | Model inference is cheap but should be throttled |
+| `/ai-insights` | 10/minute | LLM calls cost money and are slower; strict limit |
+
+**Response when exceeded:**
+```json
+{
+  "error": "Rate limit exceeded: 10 per 1 minute"
+}
+```
+
+### Structured Logging
+
+All requests are logged with timestamps, client IP, endpoint, and processing time:
+
+```
+2025-05-07 14:32:10 | INFO | challenge.api | Predict request | Flights: 3 | Client: 190.190.50.10
+2025-05-07 14:32:10 | INFO | challenge.api | Predict completed | Flights: 3 | Time: 0.045s | Client: 190.190.50.10
+2025-05-07 14:32:15 | ERROR | challenge.api | Predict error | Client: 190.190.50.10 | Error: ...
+```
+
+This enables:
+- **Debugging:** Trace errors back to specific requests
+- **Monitoring:** Alert on error rates or latency spikes
+- **Auditing:** Track API usage per client
+
 ### Error Handling
 
 - `400 Bad Request`: Validation errors (invalid airline, month, etc.)
-- `500 Internal Server Error`: Unexpected prediction failures
+- `429 Too Many Requests`: Rate limit exceeded
+- `500 Internal Server Error`: Unexpected prediction or LLM failures
 
 ### Running API Tests
 
@@ -413,7 +448,48 @@ Content-Type: application/json
 }
 ```
 
-### Submission
+## 7. Git Repository Governance
+
+### Versioning with Git Tags
+
+The project uses [Semantic Versioning](https://semver.org/) (`MAJOR.MINOR.PATCH`):
+
+| Tag | Version | Description |
+|-----|---------|-------------|
+| `v1.1.0` | Minor | Added rate limiting, structured logging, and branch protection |
+
+**Creating a new release:**
+```bash
+git tag -a v1.1.0 -m "Release v1.1.0: Rate limiting, logging, and API versioning"
+git push origin v1.1.0
+```
+
+Tags are used to:
+- Mark production releases
+- Track which code is deployed
+- Enable rollback to previous versions if needed
+
+### Branch Protection for `main`
+
+The `main` branch is protected with the following rules (configured via GitHub Settings):
+
+| Rule | Setting | Purpose |
+|------|---------|---------|
+| Require PR before merging | ✅ Enabled | Prevents direct pushes to `main` |
+| Require status checks | `ci` job must pass | Ensures tests pass before merge |
+| Require approving reviews | 1 review | Peer review for quality |
+| Dismiss stale reviews | ✅ Enabled | Re-reviews required after new commits |
+| Allow force pushes | ❌ Disabled | Prevents history rewriting |
+| Allow deletions | ❌ Disabled | Prevents accidental branch deletion |
+
+**Why this matters:**
+- `main` represents production-ready code
+- The CD pipeline auto-merges `develop` → `main` after successful deploy
+- Direct pushes to `main` bypass CI and risk breaking production
+
+---
+
+## Submission
 
 To submit the challenge, send a POST request to:
 
