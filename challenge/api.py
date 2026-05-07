@@ -248,8 +248,6 @@ async def ai_insights(request: AIInsightRequest) -> Dict[str, Any]:
 import os
 
 static_dir = os.path.join(os.path.dirname(__file__), "..", "static")
-if os.path.isdir(static_dir):
-    app.mount("/static", StaticFiles(directory=static_dir), name="static")
 
 @app.get("/")
 async def root():
@@ -258,3 +256,6 @@ async def root():
     if index_path and os.path.isfile(index_path):
         return FileResponse(index_path)
     return {"message": "Flight Delay API - UI not built"}
+
+if os.path.isdir(static_dir):
+    app.mount("/", StaticFiles(directory=static_dir, html=True), name="static")
