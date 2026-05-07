@@ -3,6 +3,12 @@ name: 'Continuous Delivery'
 on:
   push:
     branches: [develop]
+    paths-ignore:
+      - 'docs/**'
+      - '*.md'
+      - 'README*'
+      - 'LICENSE'
+      - '.gitignore'
 
 permissions:
   contents: write
