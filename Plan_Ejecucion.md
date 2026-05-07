@@ -3200,6 +3200,60 @@ npm run build
 | 10.6 | Responsive layout (mobile stack, desktop grid) | ✅ done |
 | 10.7 | LATAM branding (red #CC0000, logo) | ✅ done |
 | 10.8 | Testear localmente en puerto 8001 | ✅ done |
+| 10.9 | Agregar CORS middleware | ✅ done |
+| 10.10 | Usar URLs relativas en UI (no localhost) | ✅ done |
+| 10.11 | Remover .env con localhost para producción | ✅ done |
+
+---
+
+### Errores Encontrados y Soluciones
+
+#### Error 1: CORS - No 'Access-Control-Allow-Origin' header
+
+**Síntoma:** Browser bloquea requests desde `https://delay-model-api-xxx.a.run.app` a `localhost:8001`.
+
+**Causa:** La UI tenía hardcodeado `http://localhost:8001` en `ui/.env` (VITE_API_URL).
+
+**Fix:**
+1. Eliminar `ui/.env` del repo
+2. Cambiar default en `App.jsx`: `const API_URL = import.meta.env.VITE_API_URL || ''`
+3. Rebuild UI: `cd ui && npm run build && cp -r dist/* ../static/`
+4. Agregar CORS middleware en `api.py`:
+```python
+from fastapi.middleware.cors import CORSMiddleware
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+```
+
+#### Error 2: StaticFiles montado en /static en vez de /
+
+**Síntoma:** Pantalla blanca, assets 404 (`/assets/...` no encontrado).
+
+**Causa:** `app.mount("/static", StaticFiles(...))` servía assets en `/static/assets/` pero el HTML buscaba `/assets/`.
+
+**Fix:** Montar en `/` con `html=True`:
+```python
+app.mount("/", StaticFiles(directory=static_dir, html=True), name="static")
+```
+
+#### Error 3: CI tests fallan por static/ no existe
+
+**Síntoma:** `RuntimeError: Directory 'static' does not exist` al correr tests desde `tests/model/`.
+
+**Causa:** `StaticFiles` se inicializa al importar `api.py`, pero `tests/model/` no tiene `static/`.
+
+**Fix:** Mount condicional:
+```python
+static_dir = os.path.join(os.path.dirname(__file__), "..", "static")
+if os.path.isdir(static_dir):
+    app.mount("/", StaticFiles(directory=static_dir, html=True), name="static")
+```
 
 ---
 
@@ -3209,6 +3263,7 @@ npm run build
 2. **OPENROUTER_API_KEY**: Requerido para el chatbot `/ai-insights`. En local se pasa como env var, en GCP via GitHub Secrets
 3. **Logo file**: El logo debe estar en `ui/src/assets/latam-logo.png` y copiado a `static/` durante build
 4. **Chatbot suggestions**: Se muestran SIEMPRE, no desaparecen después del primer mensaje
+5. **NO commitear `ui/.env`**: Usar `.gitignore` para excluirlo. En producción usar URLs relativas (empty string)
 
 ---
 
@@ -3217,7 +3272,7 @@ npm run build
 | Fecha | Versión | Cambio |
 |-------|---------|--------|
 | 2026-05-07 | 2.0.0 | Agregada FASE 10: UI React con chatbot SCL Insights |
-| 2026-05-07 | 2.0.1 | Documentación de cambios y decisiones de implementación |
+| 2026-05-07 | 2.0.1 | Fixes CORS, StaticFiles mount, URLs relativas, .env cleanup |
 
 ---
 
