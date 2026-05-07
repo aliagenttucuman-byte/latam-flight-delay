@@ -6,9 +6,12 @@ __MACOSX/
 .venv/
 venv/
 *.egg-info/
-dist/
 build/
 .eggs/
 reports/
-*.html
 .gitkeep
+
+# UI source (tracked via ui/ folder)
+ui/node_modules/
+ui/dist/
+ui/.env

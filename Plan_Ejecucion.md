@@ -2714,3 +2714,520 @@ NEW ENDPOINT:
 ---
 
 **Nota:** Este feature es una PoC. No se espera que sea production-ready (sin caching, sin rate limiting en el LLM, sin retry logic robusto). El objetivo es demostrar el concepto de RAG con datos de vuelos y MiniMax.
+
+---
+
+## Flujo develop → main con CI/CD (Opción B)
+
+### Concepto
+
+```
+push a develop → CI corre en develop → CD deploya a Cloud Run desde develop → si OK → auto-merge develop→main
+```
+
+### Cambios en `.github/workflows/cd.yml`
+
+```yaml
+name: 'Continuous Delivery'
+
+on:
+  push:
+    branches: [develop]  # CAMBIO: main → develop
+
+permissions:
+  contents: write  # CAMBIO: necesario para poder hacer merge a main
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Necesario para poder hacer merge
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Authenticate to GCP
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+      - name: Set up GCP
+        run: gcloud config set project ${{ secrets.GCP_PROJECT_ID }}
+
+      - name: Deploy to Cloud Run
+        run: |
+          gcloud run deploy delay-model-api \
+            --source . \
+            --region ${{ secrets.GCP_REGION }} \
+            --platform managed \
+            --allow-unauthenticated \
+            --memory 512M \
+            --cpu 1 \
+            --set-env-vars "OPENROUTER_API_KEY=${{ secrets.OPENROUTER_API_KEY }}"
+
+      - name: Merge to main
+        if: success()
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git checkout main
+          git merge develop --no-ff -m "Merge develop into main after successful CD"
+          git push origin main
+```
+
+### Pasos para implementar
+
+#### Paso 1: Modificar `.github/workflows/cd.yml`
+
+Cambiar:
+- `branches: [main]` → `branches: [develop]`
+- Agregar `permissions: contents: write`
+- Agregar `fetch-depth: 0` en checkout (para poder hacer merge)
+- Agregar step de merge después del deploy exitoso
+
+#### Paso 2: Asegurarse que CI corre en develop
+
+El `ci.yml` actual ya tiene:
+```yaml
+on:
+  push:
+    branches: [main, develop, 'feature/**']
+  pull_request:
+    branches: [main, develop]
+```
+
+No necesita cambios.
+
+#### Paso 3: Probar el flujo
+
+1. Hacer commit en `develop`:
+   ```bash
+   git checkout develop
+   git add .
+   git commit -m "tu cambio"
+   git push origin develop
+   ```
+
+2. Verificar en GitHub Actions que:
+   - CI workflow corre en el push a develop
+   - CD workflow se dispara DESPUÉS de CI (porque el trigger es `push: [develop]`)
+   - Si CI pasa, CD hace deploy y luego merge a main
+
+3. Verificar que `main` se actualiza automáticamente
+
+### Precauciones
+
+1. **Branch Protection en main**: Si `main` está protegido, el merge automático fallará. Ir a GitHub > Settings > Branches > Add rule:
+   - Pattern: `main`
+   - ✅ Require pull request before merging (desmarcar si querés merge directo)
+   - O agregar exception para `github-actions[bot]`
+
+2. **GITHUB_TOKEN**: Por defecto, el token `secrets.GITHUB_TOKEN` tiene permisos de escritura en el repo. No necesita secret adicional.
+
+3. **Conflictos**: Si hay conflictos entre `develop` y `main`, el merge automático fallará. Resolver conflictos manualmente antes de pushear.
+
+### Verificación del flujo completo
+
+```bash
+# 1. Push a develop
+git checkout develop
+git commit --allow-empty -m "test: trigger CI/CD"
+git push origin develop
+
+# 2. Esperar ~5 min y verificar en GitHub Actions:
+#    - ci.yml corre en develop ✓
+#    - cd.yml corre en develop ✓
+#    - cd.yml hace merge a main ✓
+
+# 3. Verificar que main se actualizó
+git fetch origin
+git log origin/main --oneline -3
+```
+
+---
+
+## FASE 10: UI React con Chatbot "SCL Insights"
+
+### Resumen del Feature
+
+Agregar una interfaz web React con chatbot conversacional integrado. El usuario puede:
+- Hacer predicciones de retraso via formulario
+- Consultar insights de datos via chatbot (SCL Insights)
+
+### Arquitectura
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│                         CLIENT (Browser)                             │
+│                                                                      │
+│  ┌──────────────────────┐    ┌──────────────────────┐             │
+│  │     FlightForm        │    │   SCL Insights       │             │
+│  │  ┌──────────────────┐ │    │   (Chatbot)          │             │
+│  │  │ OPERA: [Dropdown]│ │    │                      │             │
+│  │  │ TIPOVUELO:[Drop] │ │    │  Suggested questions  │             │
+│  │  │ MES: [Dropdown]  │ │    │  + Chat history      │             │
+│  │  │ [Predict]        │ │    │                      │             │
+│  │  └──────────────────┘ │    │                      │             │
+│  │  ┌──────────────────┐ │    │                      │             │
+│  │  │ PredictionResult │ │    │                      │             │
+│  │  │ (Shows result)   │ │    │                      │             │
+│  │  └──────────────────┘ │    └──────────────────────┘             │
+│  └──────────────────────┘                                          │
+└─────────────────────────────┬───────────────────────────────────────┘
+                              │
+              ┌───────────────┴───────────────┐
+              ▼                               ▼
+┌─────────────────────────┐      ┌─────────────────────────┐
+│   POST /predict         │      │   POST /ai-insights    │
+│   (XGBoost prediction)  │      │   (LLM insights)        │
+└─────────────────────────┘      └─────────────────────────┘
+```
+
+---
+
+### Responsive Layout
+
+| Dispositivo | Layout | Descripción |
+|-------------|--------|-------------|
+| **Mobile** (< 768px) | Stack vertical | Form arriba, Chatbot abajo |
+| **Desktop** (>= 768px) | Grid 2 columnas | Form izquierda (40%), Chatbot derecha (60%) |
+
+### Dark Mode
+
+| Elemento | Color | Hex |
+|----------|-------|-----|
+| Background | Ultra dark | `#0f0f0f` |
+| Cards/Surfaces | Dark gray | `#1a1a1a` |
+| Border | Subtle | `#2a2a2a` |
+| Text primary | White | `#ffffff` |
+| Text secondary | Gray | `#a0a0a0` |
+| LATAM accent | Red | `#CC0000` |
+| Live indicator | Green | `#22c55e` |
+
+### Componentes React
+
+| Componente | Descripción | Props |
+|------------|-------------|-------|
+| `App.jsx` | Layout principal, dark mode, responsive grid | - |
+| `Header.jsx` | Logo LATAM, título, live indicator | - |
+| `FlightForm.jsx` | Formulario de predicción con validación | onPredict callback |
+| `PredictionResult.jsx` | Muestra resultado de predicción | prediction, probabilidad |
+| `SCLInsights.jsx` | Chatbot con sugerencias y chat history | - |
+
+### Archivos Creados/Modificados
+
+| Archivo | Cambio |
+|---------|--------|
+| `ui/` | NUEVO: Proyecto React Vite completo |
+| `ui/src/App.jsx` | Componente principal con layout responsive |
+| `ui/src/components/Header.jsx` | Header con logo y live indicator |
+| `ui/src/components/FlightForm.jsx` | Formulario de predicción |
+| `ui/src/components/PredictionResult.jsx` | Resultado de predicción |
+| `ui/src/components/SCLInsights.jsx` | Chatbot conversacional |
+| `ui/tailwind.config.js` | Config dark mode con `#0f0f0f` |
+| `ui/src/index.css` | Estilos base con Tailwind |
+| `static/` | NUEVO: Build output de React (copiado por Dockerfile) |
+| `challenge/api.py` | MODIFICADO: Serve static files + FileResponse at root |
+| `Dockerfile` | MODIFICADO: Copia `static/` al contenedor |
+
+---
+
+### Implementación Paso a Paso
+
+#### Paso 10.1: Crear proyecto React con Vite
+
+```bash
+cd ui
+npm create vite@latest . -- --template react
+npm install
+npm install -D tailwindcss postcss autoprefixer
+npx tailwindcss init -p
+```
+
+#### Paso 10.2: Configurar Tailwind con dark mode
+
+```javascript
+// tailwind.config.js
+export default {
+  content: [
+    "./index.html",
+    "./src/**/*.{js,ts,jsx,tsx}",
+  ],
+  darkMode: 'class',
+  theme: {
+    extend: {
+      colors: {
+        surface: '#1a1a1a',
+        border: '#2a2a2a',
+        latam: '#CC0000',
+      }
+    },
+  },
+  plugins: [],
+}
+```
+
+```css
+/* src/index.css */
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+body {
+  background-color: #0f0f0f;
+  color: #ffffff;
+}
+```
+
+#### Paso 10.3: Crear componentes
+
+```jsx
+// src/components/Header.jsx
+export function Header() {
+  return (
+    <header className="flex items-center gap-3 mb-6">
+      <img src="/latam-logo.png" alt="LATAM" className="h-10" />
+      <div>
+        <h1 className="text-xl font-bold">SCL Flight Delay Predictor</h1>
+        <div className="flex items-center gap-1.5 text-xs text-gray-400">
+          <span className="w-2 h-2 rounded-full bg-green-500 animate-pulse"></span>
+          Live API
+        </div>
+      </div>
+    </header>
+  );
+}
+```
+
+```jsx
+// src/components/FlightForm.jsx
+import { useState } from 'react';
+
+const AIRLINES = ["American Airlines", "Air France", ...];
+const TIPOS = ["I", "N"];
+const MESES = [1, 2, ..., 12];
+
+export function FlightForm({ onPredict }) {
+  const [form, setForm] = useState({ OPERA: '', TIPOVUELO: '', MES: '' });
+  const [loading, setLoading] = useState(false);
+
+  const handleSubmit = async (e) => {
+    e.preventDefault();
+    setLoading(true);
+    try {
+      const res = await fetch('/predict', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ flights: [form] })
+      });
+      const data = await res.json();
+      onPredict(data.predict[0]);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <form onSubmit={handleSubmit} className="space-y-4">
+      <select value={form.OPERA} onChange={e => setForm({...form, OPERA: e.target.value})}>
+        <option value="">Select Airline</option>
+        {AIRLINES.map(a => <option key={a} value={a}>{a}</option>)}
+      </select>
+      <select value={form.TIPOVUELO} onChange={e => setForm({...form, TIPOVUELO: e.target.value})}>
+        <option value="">Select Type</option>
+        <option value="I">International</option>
+        <option value="N">National</option>
+      </select>
+      <select value={form.MES} onChange={e => setForm({...form, MES: Number(e.target.value)})}>
+        <option value="">Select Month</option>
+        {MESES.map(m => <option key={m} value={m}>{m}</option>)}
+      </select>
+      <button type="submit" disabled={loading}>
+        {loading ? 'Predicting...' : 'Predict Delay'}
+      </button>
+    </form>
+  );
+}
+```
+
+```jsx
+// src/components/SCLInsights.jsx
+const SUGGESTED_QUESTIONS = [
+  "¿Por qué se retrasan los vuelos en diciembre?",
+  "¿Cuál es la mejor aerolinea para volar?",
+  "¿Qué mes tiene menos retrasos?"
+];
+
+export function SCLInsights() {
+  const [messages, setMessages] = useState([]);
+  const [input, setInput] = useState('');
+  const [loading, setLoading] = useState(false);
+
+  const sendQuestion = async (question) => {
+    setLoading(true);
+    try {
+      const res = await fetch('/ai-insights', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ question })
+      });
+      const data = await res.json();
+      setMessages(prev => [...prev, { role: 'user', content: question }, { role: 'assistant', content: data.insight }]);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <div className="flex flex-col h-full">
+      <h2 className="text-lg font-semibold mb-4">SCL Insights</h2>
+      <div className="flex flex-wrap gap-2 mb-4">
+        {SUGGESTED_QUESTIONS.map(q => (
+          <button key={q} onClick={() => sendQuestion(q)} className="text-sm px-3 py-1.5 rounded border border-[#2a2a2a] hover:border-[#CC0000]">
+            {q}
+          </button>
+        ))}
+      </div>
+      <div className="flex-1 overflow-y-auto space-y-3">
+        {messages.map((m, i) => (
+          <div key={i} className={m.role === 'user' ? 'text-right' : 'text-left'}>
+            <span className={`inline-block px-3 py-2 rounded ${m.role === 'user' ? 'bg-[#CC0000]' : 'bg-[#1a1a1a]'}`}>
+              {m.content}
+            </span>
+          </div>
+        ))}
+        {loading && <div className="text-gray-400">Consultando datos...</div>}
+      </div>
+      <form onSubmit={e => { e.preventDefault(); sendQuestion(input); setInput(''); }} className="mt-4 flex gap-2">
+        <input value={input} onChange={e => setInput(e.target.value)} placeholder="Ask about flight delays..." className="flex-1 bg-[#1a1a1a] border border-[#2a2a2a] rounded px-3 py-2" />
+        <button type="submit" disabled={loading}>Send</button>
+      </form>
+    </div>
+  );
+}
+```
+
+```jsx
+// src/App.jsx
+import { Header } from './components/Header';
+import { FlightForm } from './components/FlightForm';
+import { PredictionResult } from './components/PredictionResult';
+import { SCLInsights } from './components/SCLInsights';
+import { useState } from 'react';
+
+export default function App() {
+  const [prediction, setPrediction] = useState(null);
+
+  return (
+    <div className="min-h-screen bg-[#0f0f0f] text-white p-4 md:p-8">
+      <div className="max-w-6xl mx-auto">
+        <Header />
+        <div className="grid grid-cols-1 md:grid-cols-[1fr_1.5fr] gap-6">
+          <div className="space-y-6">
+            <div className="bg-[#1a1a1a] rounded-lg p-6 border border-[#2a2a2a]">
+              <FlightForm onPredict={setPrediction} />
+              <PredictionResult prediction={prediction} />
+            </div>
+          </div>
+          <div className="bg-[#1a1a1a] rounded-lg p-6 border border-[#2a2a2a]">
+            <SCLInsights />
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+```
+
+#### Paso 10.4: Modificar api.py para servir UI
+
+```python
+# challenge/api.py - Agregar al final antes de app
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
+import os
+
+# Mount static files directory
+app.mount("/static", StaticFiles(directory="static", html=True), name="static")
+
+@app.get("/")
+async def root():
+    """Serve the React UI."""
+    return FileResponse("static/index.html")
+```
+
+#### Paso 10.5: Actualizar Dockerfile
+
+```dockerfile
+# Dockerfile - Agregar después de COPY data/
+COPY static/ ./static/
+```
+
+#### Paso 10.6: Build y copiar React a static/
+
+```bash
+cd ui
+npm run build
+# Copiar contenido de ui/dist/ a static/
+```
+
+---
+
+### API Endpoints usados por la UI
+
+| Endpoint | Método | Request | Response |
+|----------|--------|---------|----------|
+| `/predict` | POST | `{"flights": [{"OPERA": "...", "TIPOVUELO": "I", "MES": 7}]}` | `{"predict": [1]}` |
+| `/ai-insights` | POST | `{"question": "¿Por qué se retrasan los vuelos?"}` | `{"insight": "...", "context_used": {...}}` |
+| `/health` | GET | - | `{"status": "OK"}` |
+
+---
+
+### Checklist de Implementación
+
+| Paso | Descripción | Estado |
+|------|-------------|--------|
+| 10.1 | Crear proyecto React con Vite | ✅ done |
+| 10.2 | Configurar Tailwind CSS con dark mode | ✅ done |
+| 10.3 | Crear componentes (Header, FlightForm, PredictionResult, SCLInsights) | ✅ done |
+| 10.4 | Modificar api.py para servir static files | ✅ done |
+| 10.5 | Actualizar Dockerfile para copiar static/ | ✅ done |
+| 10.6 | Responsive layout (mobile stack, desktop grid) | ✅ done |
+| 10.7 | LATAM branding (red #CC0000, logo) | ✅ done |
+| 10.8 | Testear localmente en puerto 8001 | ✅ done |
+
+---
+
+### Notas Importantes
+
+1. **Puerto 8001 para local testing**: Docker corre en puerto 8001 porque 8000 está ocupado
+2. **OPENROUTER_API_KEY**: Requerido para el chatbot `/ai-insights`. En local se pasa como env var, en GCP via GitHub Secrets
+3. **Logo file**: El logo debe estar en `ui/src/assets/latam-logo.png` y copiado a `static/` durante build
+4. **Chatbot suggestions**: Se muestran SIEMPRE, no desaparecen después del primer mensaje
+
+---
+
+### Historial de Cambios (Actualizado)
+
+| Fecha | Versión | Cambio |
+|-------|---------|--------|
+| 2026-05-07 | 2.0.0 | Agregada FASE 10: UI React con chatbot SCL Insights |
+| 2026-05-07 | 2.0.1 | Documentación de cambios y decisiones de implementación |
+
+---
+
+## Resumen de Feature Flags
+
+| Feature | Status | Notes |
+|---------|--------|-------|
+| XGBoost model | ✅ Complete | Top 10 features, class balancing |
+| FastAPI endpoint | ✅ Complete | `/predict`, `/health` |
+| AI Insights (RAG) | ✅ Complete | `/ai-insights` con Polars + MiniMax |
+| React UI | ✅ Complete | Dark mode, responsive, chatbot |
+| CI/CD Pipeline | ✅ Complete | develop → main auto-merge |
+| Local Docker | ✅ Complete | Puerto 8001, env var OPENROUTER_API_KEY |
