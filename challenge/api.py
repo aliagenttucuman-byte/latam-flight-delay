@@ -6,6 +6,7 @@ from __future__ import annotations
 from fastapi import FastAPI, HTTPException, status
 from fastapi.responses import JSONResponse, RedirectResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.exceptions import RequestValidationError
 from pydantic import BaseModel, Field, field_validator, ValidationError
 from typing import Annotated, List, Dict, Any, Optional
@@ -92,6 +93,14 @@ app = FastAPI(
     title="Flight Delay Prediction API",
     description="API for predicting flight delays at SCL airport using XGBoost",
     version="1.0.0"
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 
