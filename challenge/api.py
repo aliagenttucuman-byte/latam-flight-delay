@@ -236,4 +236,8 @@ async def ai_insights(request: AIInsightRequest) -> Dict[str, Any]:
         )
 
 
-app.mount("/", StaticFiles(directory="static", html=True), name="static")
+import os
+
+static_dir = os.path.join(os.path.dirname(__file__), "..", "static")
+if os.path.isdir(static_dir):
+    app.mount("/", StaticFiles(directory=static_dir, html=True), name="static")
