@@ -249,4 +249,12 @@ import os
 
 static_dir = os.path.join(os.path.dirname(__file__), "..", "static")
 if os.path.isdir(static_dir):
-    app.mount("/", StaticFiles(directory=static_dir, html=True), name="static")
+    app.mount("/static", StaticFiles(directory=static_dir), name="static")
+
+@app.get("/")
+async def root():
+    """Serve the React UI."""
+    index_path = os.path.join(static_dir, "index.html") if os.path.isdir(static_dir) else None
+    if index_path and os.path.isfile(index_path):
+        return FileResponse(index_path)
+    return {"message": "Flight Delay API - UI not built"}
