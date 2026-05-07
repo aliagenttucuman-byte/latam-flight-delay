@@ -4,7 +4,7 @@ import FlightForm from './components/FlightForm'
 import PredictionResult from './components/PredictionResult'
 import SCLInsights from './components/SCLInsights'
 
-const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000'
+const API_URL = import.meta.env.VITE_API_URL || ''
 
 function App() {
   const [prediction, setPrediction] = useState(null)
