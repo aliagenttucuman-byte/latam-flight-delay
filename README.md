@@ -119,3 +119,16 @@ We are looking for a proper `CI/CD` implementation for this development.
 
 - Create a new folder called `.github` and copy the `workflows` folder that we provided inside it.
 - Complete both `ci.yml` and `cd.yml`(consider what you did in the previous parts).
+
+---
+
+## Implementation Documentation
+
+For detailed technical documentation about the implementation, including:
+- Model architecture and design decisions
+- API endpoints and deployment details
+- CI/CD pipeline configuration
+- Additional features (React UI, AI Insights chatbot, CORS configuration)
+- Troubleshooting log for production fixes
+
+See: [docs/challenge.md](docs/challenge.md)
