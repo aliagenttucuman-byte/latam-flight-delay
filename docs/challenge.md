@@ -104,7 +104,7 @@ make model-test
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
-| `/health` | GET | Health check — returns `{"status": "OK", "model_loaded": true, "version": "1.1.0"}` |
+| `/health` | GET | Health check — returns `{"status": "OK", "model_loaded": true, "version": "1.2.0"}` |
 | `/predict` | POST | Predict delay probability for a batch of flights |
 | `/ai-insights` | POST | AI-powered conversational insights about flight delays |
 
@@ -137,22 +137,19 @@ Pydantic v2 `Flight` model validates:
 - `TIPOVUELO`: must be `"I"` (International) or `"N"` (National)
 - `MES`: integer 1–12
 
-### Lazy Model Loading
+### Model Loading
 
-The model is loaded as a singleton on the first `/predict` request:
+The model is loaded at startup from a pre-serialized `.pkl` file generated during the Docker build:
 
 ```python
-_model: Any = None
-
 def load_model() -> Any:
     if _model is not None:
         return _model
-    # ... train on data.csv ...
-    _model = model
-    return _model
+    # Load pre-trained model from disk (<1s)
+    model.load("data/delay_model.pkl")
 ```
 
-This avoids consuming memory at startup if the API is only used for health checks.
+If the serialized model is not found (e.g., local development without building), it falls back to training from `data/data.csv`.
 
 ### Rate Limiting
 
