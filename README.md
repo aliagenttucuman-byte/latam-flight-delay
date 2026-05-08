@@ -129,6 +129,5 @@ For detailed technical documentation about the implementation, including:
 - API endpoints and deployment details
 - CI/CD pipeline configuration
 - Additional features (React UI, AI Insights chatbot, CORS configuration)
-- Troubleshooting log for production fixes
 
 See: [docs/challenge.md](docs/challenge.md)
