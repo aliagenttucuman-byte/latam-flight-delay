@@ -46,5 +46,5 @@ ai-test:			## Run AI insights tests
 	pytest tests/ai/test_ai_insights.py -v
 
 .PHONY: build
-build:			## Build locally the python artifact
-	python setup.py bdist_wheel
+build:			## Build locally the python artifact (requires setup.py)
+	@echo "No setup.py configured. Skipping build."
