@@ -14,7 +14,7 @@ This section maps each requirement from the original `README.md` challenge to it
 | Requirement | Status | Evidence |
 |-------------|--------|----------|
 | Public GitHub repository | ✅ | [latam-flight-delay](https://github.com/aliagenttucuman-byte/latam-flight-delay) |
-| Use `main` for releases | ✅ | CD auto-merges `develop` → `main` after successful deploy |
+| Use `main` for releases | ✅ | `main` is the stable release branch; `develop` is the active integration and deployment branch |
 | GitFlow (no delete dev branches) | ✅ | `develop` branch preserved and actively used |
 | Do not change challenge structure | ✅ | Original `challenge/`, `tests/`, `docs/` folders intact |
 | Do not rename provided methods | ✅ | `DelayModel.preprocess()`, `fit()`, `predict()` signatures unchanged |
@@ -40,7 +40,7 @@ Per the challenge instructions ("*You can create the extra classes and methods y
 | `docker-compose.yml` | Created for local dev | Hot-reload development workflow |
 | `challenge/model.py` | Removed `use_label_encoder=True` | Parameter deprecated in XGBoost 1.5+ |
 | `.github/workflows/ci.yml` | Added `ai-test` job | Tests for the additional `/ai-insights` endpoint |
-| `.github/workflows/cd.yml` | Trigger on `develop`, auto-merge to `main` | GitFlow-compliant: develop for integration, main for releases |
+| `.github/workflows/cd.yml` | Trigger on `develop` | Deploys to Cloud Run on every push to `develop` |
 
 ---
 
@@ -238,13 +238,20 @@ Cloud Run injects `PORT=8080` automatically. The container **must** listen on th
 ### Local Development
 
 ```bash
-# Build and run locally
+# 1. Copy the environment template and add your OpenRouter API key
+cp .env.example .env
+# Edit .env and set OPENROUTER_API_KEY=sk-...
+
+# 2. Build and run locally
 docker build -t delay-model-api:local .
 docker run -p 8001:8080 -e OPENROUTER_API_KEY=$OPENROUTER_API_KEY delay-model-api:local
 
 # Or with docker-compose (hot-reload)
 docker-compose up --build
 ```
+
+> **Security note:** `.env` is listed in `.gitignore` and must never be committed. The production deployment uses GitHub Secrets (`OPENROUTER_API_KEY`) injected by the CD workflow.
+
 
 ### Stress Test
 
@@ -267,7 +274,7 @@ make stress-test
 | Workflow | File | Trigger | Purpose |
 |----------|------|---------|---------|
 | CI | `.github/workflows/ci.yml` | Push to `main`/`develop`/`feature/**`, PRs | Run model, API, and AI insights tests |
-| CD | `.github/workflows/cd.yml` | Push to `develop` | Deploy to Cloud Run, auto-merge to `main` |
+| CD | `.github/workflows/cd.yml` | Push to `develop` | Deploy to Cloud Run |
 
 ### CI Pipeline (`ci.yml`)
 
@@ -295,22 +302,18 @@ on:
   push:
     branches: [develop]
 
-permissions:
-  contents: write
-
 jobs:
   deploy:
     steps:
-      - Checkout with fetch-depth: 0
+      - Checkout
       - Authenticate to GCP
       - Deploy to Cloud Run: gcloud run deploy --source .
-      - If success: git merge develop → main
 ```
 
 ### GitFlow Integration
 
-- **develop:** Integration branch. All feature branches merge here.
-- **main:** Release branch. Updated automatically by CD after successful deploy.
+- **develop:** Integration and deployment branch. All feature branches merge here. CD deploys directly from this branch.
+- **main:** Release branch. Updated manually via pull request when a stable release is ready.
 - **Feature branches:** `feature/*` — CI runs on push.
 
 This satisfies the challenge requirement: "*It is highly recommended to use GitFlow development practices.*"
@@ -484,7 +487,7 @@ The `main` branch is protected with the following rules (configured via GitHub S
 
 **Why this matters:**
 - `main` represents production-ready code
-- The CD pipeline auto-merges `develop` → `main` after successful deploy
+- The CD pipeline deploys from `develop` on every push
 - Direct pushes to `main` bypass CI and risk breaking production
 
 ---

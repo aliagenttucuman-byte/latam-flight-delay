@@ -11,6 +11,9 @@ build/
 reports/
 .gitkeep
 
+# Environment variables (secrets)
+.env
+
 # UI source (tracked via ui/ folder)
 ui/node_modules/
 ui/dist/
