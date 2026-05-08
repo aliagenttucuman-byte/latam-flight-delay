@@ -1,8 +1,7 @@
 from __future__ import annotations
 
-# Changes from original:
-#   - Using @validator instead of @field_validator (Pydantic 1.10.2 compatibility, not v2)
-#   - See: Plan_Ejecucion.md section "Cambios Realizados vs Original"
+# Uses @field_validator (Pydantic v2 syntax)
+#   - Original skeleton used Pydantic 1.10.2 @validator
 from fastapi import FastAPI, HTTPException, status, Request
 from fastapi.responses import JSONResponse, RedirectResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -302,8 +301,9 @@ static_dir = os.path.join(os.path.dirname(__file__), "..", "static")
 
 @app.on_event("startup")
 async def startup_event():
-    """Log startup info."""
+    """Log startup info and preload model."""
     logger.info("API starting up | Version: 1.1.0")
+    load_model()
 
 @app.get("/")
 @limiter.limit("60/minute")
