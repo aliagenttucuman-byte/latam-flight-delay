@@ -14,6 +14,12 @@ reports/
 # Environment variables (secrets)
 .env
 
+# Serialized model (generated during Docker build)
+data/delay_model.pkl
+
+# Coverage reports
+.coverage
+
 # UI source (tracked via ui/ folder)
 ui/node_modules/
 ui/dist/
