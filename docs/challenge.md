@@ -238,13 +238,20 @@ Cloud Run injects `PORT=8080` automatically. The container **must** listen on th
 ### Local Development
 
 ```bash
-# Build and run locally
+# 1. Copy the environment template and add your OpenRouter API key
+cp .env.example .env
+# Edit .env and set OPENROUTER_API_KEY=sk-...
+
+# 2. Build and run locally
 docker build -t delay-model-api:local .
 docker run -p 8001:8080 -e OPENROUTER_API_KEY=$OPENROUTER_API_KEY delay-model-api:local
 
 # Or with docker-compose (hot-reload)
 docker-compose up --build
 ```
+
+> **Security note:** `.env` is listed in `.gitignore` and must never be committed. The production deployment uses GitHub Secrets (`OPENROUTER_API_KEY`) injected by the CD workflow.
+
 
 ### Stress Test
 
