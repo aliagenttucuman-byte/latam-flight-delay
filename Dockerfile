@@ -18,6 +18,11 @@ COPY static/ ./static/
 # Generate context.json during build (only once)
 RUN python -c "from challenge.ai_insights import generate_and_save_context; generate_and_save_context()"
 
+# Train and serialize the model during build for fast startup
+COPY scripts/train_model.py ./scripts/train_model.py
+ENV PYTHONPATH=/app
+RUN python scripts/train_model.py
+
 ENV PYTHONUNBUFFERED=1
 
 EXPOSE 8080

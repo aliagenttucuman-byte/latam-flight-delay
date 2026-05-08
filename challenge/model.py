@@ -186,6 +186,18 @@ class DelayModel:
         )
         self._model.fit(features, y)
 
+    def save(self, path: str) -> None:
+        """Serialize the fitted model to disk."""
+        if self._model is None:
+            raise RuntimeError("Model has not been fitted.")
+        import joblib
+        joblib.dump(self._model, path)
+
+    def load(self, path: str) -> None:
+        """Deserialize a previously fitted model from disk."""
+        import joblib
+        self._model = joblib.load(path)
+
     def predict(self, features: pd.DataFrame) -> List[int]:
         """Predict delays for preprocessed features.
 
