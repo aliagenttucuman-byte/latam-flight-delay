@@ -108,7 +108,7 @@ class FlightBatch(BaseModel):
 app = FastAPI(
     title="Flight Delay Prediction API",
     description="API for predicting flight delays at SCL airport using XGBoost",
-    version="1.1.0"
+    version="1.2.0"
 )
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
@@ -132,30 +132,44 @@ async def validation_exception_handler(request, exc):
 
 
 _model: Any = None
+_model_loading: bool = False
 
 
 def load_model() -> Any:
-    """Load and fit the DelayModel on startup (lazy initialization)."""
-    global _model
+    """Load the DelayModel from serialized file (fast) or train if needed."""
+    global _model, _model_loading
 
     if _model is not None:
         return _model
 
+    _model_loading = True
     logger.info("Loading model...")
     start = time.time()
 
     from challenge.model import DelayModel
 
     model = DelayModel()
+    model_path = "data/delay_model.pkl"
 
+    import os
+    if os.path.isfile(model_path):
+        logger.info(f"Loading pre-trained model from {model_path}")
+        model.load(model_path)
+        _model = model
+        _model_loading = False
+        elapsed = time.time() - start
+        logger.info(f"Model loaded from disk in {elapsed:.2f}s")
+        return _model
+
+    logger.info("No serialized model found. Training from scratch...")
     data = pd.read_csv("data/data.csv", low_memory=False)
-
     features, target = model.preprocess(data, target_column="delay")
     model.fit(features, target)
 
     _model = model
+    _model_loading = False
     elapsed = time.time() - start
-    logger.info(f"Model loaded and trained in {elapsed:.2f}s")
+    logger.info(f"Model trained in {elapsed:.2f}s")
     return _model
 
 
@@ -164,10 +178,16 @@ def load_model() -> Any:
 async def get_health(request: Request) -> Dict[str, Any]:
     """Health check endpoint."""
     logger.info(f"Health check | Client: {request.client.host if request.client else 'unknown'}")
+    if _model_loading:
+        return {
+            "status": "loading",
+            "model_loaded": False,
+            "version": "1.2.0"
+        }
     return {
         "status": "OK",
         "model_loaded": _model is not None,
-        "version": "1.1.0"
+        "version": "1.2.0"
     }
 
 
@@ -301,9 +321,10 @@ static_dir = os.path.join(os.path.dirname(__file__), "..", "static")
 
 @app.on_event("startup")
 async def startup_event():
-    """Log startup info and preload model."""
+    """Log startup info and preload model in background."""
     logger.info("API starting up | Version: 1.1.0")
-    load_model()
+    import asyncio
+    asyncio.create_task(asyncio.to_thread(load_model))
 
 @app.get("/")
 @limiter.limit("60/minute")

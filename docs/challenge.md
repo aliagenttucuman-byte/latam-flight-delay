@@ -3,7 +3,7 @@
 **Challenge:** Software Engineer (ML & LLMs) — LAN LATAM  
 **Repository:** https://github.com/aliagenttucuman-byte/latam-flight-delay  
 **Production URL:** https://delay-model-api-chxpmithta-rj.a.run.app  
-**Status:** Complete and Deployed ✓ | **Version:** v1.1.0
+**Status:** Complete and Deployed ✓ | **Version:** v1.2.0
 
 ---
 
@@ -41,6 +41,12 @@ Per the challenge instructions ("*You can create the extra classes and methods y
 | `challenge/model.py` | Removed `use_label_encoder=True` | Parameter deprecated in XGBoost 1.5+ |
 | `.github/workflows/ci.yml` | Added `ai-test` job | Tests for the additional `/ai-insights` endpoint |
 | `.github/workflows/cd.yml` | Trigger on `develop` | Deploys to Cloud Run on every push to `develop` |
+| `.coveragerc` | Created coverage config | Standard coverage reporting for CI and local tests |
+| `challenge/api.py` | Startup model preloading + loading state | Reduces first-request latency; UI shows spinner during load |
+| `challenge/model.py` | Added `save()`/`load()` with `joblib` | Enables model serialization for instant startup |
+| `Dockerfile` | Pre-train model during build | Serializes `delay_model.pkl` at build time; startup <1s |
+| `static/index.html` | Added loading overlay + title | Better UX while model loads; correct page title |
+| `.env.example` + `.gitignore` | Template + ignore `.env` | Prevents accidental secret commits |
 
 ---
 
@@ -253,6 +259,41 @@ docker-compose up --build
 > **Security note:** `.env` is listed in `.gitignore` and must never be committed. The production deployment uses GitHub Secrets (`OPENROUTER_API_KEY`) injected by the CD workflow.
 
 
+### Performance Optimization: Model Serialization
+
+The original implementation trained the XGBoost model on every container startup, taking ~25 seconds with 682k rows. As the dataset grows, this would degrade further.
+
+**Solution:** Pre-train and serialize the model during the Docker build.
+
+```
+Build Time (Dockerfile):
+  data/data.csv → DelayModel.fit() → data/delay_model.pkl (~50KB)
+
+Runtime (Container startup):
+  data/delay_model.pkl → joblib.load() → ready in <1s
+```
+
+| Metric | Before | After |
+|--------|--------|-------|
+| Startup time | ~25s | **<1s** |
+| Training location | Container startup | **Docker build** |
+| Impact of data growth | Linear slowdown | **Constant** |
+| User experience | Long loading spinner | **Instant UI** |
+
+**Implementation:**
+- `challenge/model.py`: Added `save()` and `load()` methods using `joblib`
+- `scripts/train_model.py`: Build-time script that trains and serializes
+- `Dockerfile`: `RUN python scripts/train_model.py` during build
+- `challenge/api.py`: `load_model()` loads `.pkl` if available; falls back to training
+
+**UI Loading State:**
+The React UI includes a loading overlay that polls `/health` every 1.5s. It displays:
+- Spinner animation
+- "Loading API..." message
+- "Model was pre-trained at build time. Almost ready."
+
+When `model_loaded: true` is returned, the overlay hides automatically.
+
 ### Stress Test
 
 ```bash
@@ -460,6 +501,7 @@ The project uses [Semantic Versioning](https://semver.org/) (`MAJOR.MINOR.PATCH`
 | Tag | Version | Description |
 |-----|---------|-------------|
 | `v1.1.0` | Minor | Added rate limiting, structured logging, and branch protection |
+| `v1.2.0` | Minor | Model serialization at build time, loading UI, CD fix, security cleanup |
 
 **Creating a new release:**
 ```bash
