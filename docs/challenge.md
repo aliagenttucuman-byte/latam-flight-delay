@@ -489,7 +489,61 @@ Content-Type: application/json
 }
 ```
 
-## 7. Git Repository Governance
+## 7. Future Work — Model Improvements
+
+> **Note:** The challenge instructions stated "*It is not necessary to make improvements to the model.*" Therefore, the current implementation faithfully reproduces the Data Scientist's chosen XGBoost model without modifications. Below are concrete improvements that would be applied in a production MLE workflow.
+
+### 7.1 Hyperparameter Optimization
+
+The current model uses default XGBoost parameters with `learning_rate=0.01`. In production, we would:
+
+- Run **Optuna** or **Ray Tune** to optimize:
+  - `max_depth` (currently default 6)
+  - `min_child_weight`
+  - `subsample` and `colsample_bytree`
+  - `n_estimators` with early stopping
+- Expected impact: **+2-3% AUC** on validation set
+
+### 7.2 Feature Engineering
+
+The current model only uses `OPERA`, `TIPOVUELO`, and `MES`. Additional features that showed promise in the exploration notebook:
+
+- `high_season`: binary flag for peak travel periods
+- `period_day`: morning/afternoon/night based on `Fecha-I`
+- `min_diff`: difference between scheduled and actual time
+- Day of week (`DIANOM`) cyclical encoding
+
+### 7.3 Model Monitoring & Drift Detection
+
+For a production MLE system, we would implement:
+
+| Component | Tool | Purpose |
+|-----------|------|---------|
+| **Data drift** | Evidently AI | Detect distribution shifts in input features |
+| **Concept drift** | Custom metrics | Monitor if delay patterns change seasonally |
+| **Performance decay** | Prometheus + Grafana | Alert if F1-score drops below threshold |
+| **Shadow deployment** | Cloud Run traffic splitting | Test new model versions with 5% traffic |
+
+### 7.4 Automated Retraining Pipeline
+
+```
+Weekly trigger → Fetch new data → Validate schema → Retrain → 
+Compare vs baseline → If improvement > 2% → Deploy to staging → 
+Shadow test 24h → Promote to production
+```
+
+This would be implemented as a second Cloud Run job triggered by Cloud Scheduler.
+
+### 7.5 Explainability
+
+For regulatory compliance and business trust:
+- **SHAP values**: Per-prediction feature importance
+- **PDP plots**: Partial dependence for business stakeholders
+- Endpoint: `GET /explain?flight_id=123` returning SHAP breakdown
+
+---
+
+## 8. Git Repository Governance
 
 ### Versioning with Git Tags
 
