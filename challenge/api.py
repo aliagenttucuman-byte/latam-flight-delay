@@ -108,7 +108,7 @@ class FlightBatch(BaseModel):
 app = FastAPI(
     title="Flight Delay Prediction API",
     description="API for predicting flight delays at SCL airport using XGBoost",
-    version="1.1.0"
+    version="1.2.0"
 )
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
@@ -182,12 +182,12 @@ async def get_health(request: Request) -> Dict[str, Any]:
         return {
             "status": "loading",
             "model_loaded": False,
-            "version": "1.1.0"
+            "version": "1.2.0"
         }
     return {
         "status": "OK",
         "model_loaded": _model is not None,
-        "version": "1.1.0"
+        "version": "1.2.0"
     }
 
 
